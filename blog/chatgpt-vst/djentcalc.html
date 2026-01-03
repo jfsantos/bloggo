@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Djent Poly-Gen v3.0</title>
+    <style>
+        body { background: #0a0a0a; color: #00ffcc; font-family: 'Courier New', Courier, monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        canvas { background: #000; border: 2px solid #111; border-radius: 50%; box-shadow: 0 0 40px rgba(0, 255, 204, 0.1); margin-bottom: 20px; }
+        .ui-panel { background: #111; padding: 25px; border-radius: 15px; border: 1px solid #222; width: 340px; box-sizing: border-box; }
+        .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        label { font-size: 10px; letter-spacing: 1px; color: #888; }
+        .val-display { font-size: 12px; color: #fff; width: 30px; text-align: right; }
+        input[type=range] { width: 150px; accent-color: #ff0055; cursor: pointer; }
+        button { width: 100%; padding: 18px; background: #00ffcc; border: none; font-weight: bold; cursor: pointer; color: #000; letter-spacing: 2px; transition: 0.2s; margin-top: 10px; }
+        button:hover { background: #fff; }
+        .active-btn { background: #ff0055 !important; color: white !important; }
+    </style>
+</head>
+<body>
+
+    <h2 style="letter-spacing: 5px; text-shadow: 0 0 10px #00ffcc66;">PROG-GEN ENGINE</h2>
+    <canvas id="viz" width="400" height="400"></canvas>
+
+    <div class="ui-panel">
+        <div class="row">
+            <label>BPM</label>
+            <input type="range" id="bpm" min="60" max="220" value="130">
+            <span class="val-display" id="bpmVal">130</span>
+        </div>
+        <div class="row">
+            <label>STEPS</label>
+            <input type="range" id="steps" min="4" max="32" value="16">
+            <span class="val-display" id="stepsVal">16</span>
+        </div>
+        <div class="row">
+            <label>HITS</label>
+            <input type="range" id="pulses" min="1" max="16" value="7">
+            <span class="val-display" id="hitsVal">7</span>
+        </div>
+        <div class="row">
+            <label>ROTATE</label>
+            <input type="range" id="rotate" min="0" max="15" value="0">
+            <span class="val-display" id="rotVal">0</span>
+        </div>
+        <button id="playBtn">BOOT SYSTEM</button>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <script>
+        const canvas = document.getElementById('viz');
+        const ctx = canvas.getContext('2d');
+        
+        let currentPattern = [];
+        let playIdx = 0;
+        let snareIdx = 0;
+
+        const kick = new Tone.MembraneSynth({ pitchDecay: 0.05, octaves: 4 }).toDestination();
+        const snare = new Tone.NoiseSynth({ envelope: { attack: 0.001, decay: 0.15, sustain: 0 } }).toDestination();
+
+        function generateBjorklund(steps, pulses) {
+            if (pulses >= steps) return Array(steps).fill(1);
+            if (pulses <= 0) return Array(steps).fill(0);
+            let groups = [];
+            for (let i = 0; i < steps; i++) groups.push([i < pulses ? 1 : 0]);
+            while (groups.length > 1) {
+                let p = 0;
+                let first = JSON.stringify(groups[0]);
+                while(p < groups.length && JSON.stringify(groups[p]) === first) p++;
+                if (p === groups.length) break;
+                let r = groups.length - p;
+                let count = Math.min(p, r);
+                for (let i = 0; i < count; i++) groups[i] = groups[i].concat(groups.pop());
+            }
+            return groups.flat();
+        }
+
+        const update = () => {
+            const s = parseInt(document.getElementById('steps').value);
+            const p = parseInt(document.getElementById('pulses').value);
+            const rot = parseInt(document.getElementById('rotate').value);
+            const b = parseInt(document.getElementById('bpm').value);
+            
+            // Update displays
+            document.getElementById('stepsVal').innerText = s;
+            document.getElementById('hitsVal').innerText = p;
+            document.getElementById('rotVal').innerText = rot;
+            document.getElementById('bpmVal').innerText = b;
+            
+            // Update Engine
+            Tone.Transport.bpm.value = b;
+            document.getElementById('rotate').max = s - 1;
+
+            let pattern = generateBjorklund(s, Math.min(p, s));
+            for(let i = 0; i < rot; i++) pattern.push(pattern.shift());
+            currentPattern = pattern;
+            playIdx = 0; 
+        };
+
+        const loop = new Tone.Loop((time) => {
+            if (currentPattern[playIdx] === 1) kick.triggerAttackRelease("C1", "16n", time);
+            if (snareIdx === 4 || snareIdx === 12) snare.triggerAttackRelease("16n", time);
+            playIdx = (playIdx + 1) % currentPattern.length;
+            snareIdx = (snareIdx + 1) % 16;
+        }, "16n");
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const cx = 200, cy = 200;
+
+            currentPattern.forEach((val, i) => {
+                const ang = (i / currentPattern.length) * Math.PI * 2 - Math.PI / 2;
+                const x = cx + 110 * Math.cos(ang), y = cy + 110 * Math.sin(ang);
+                ctx.beginPath();
+                ctx.arc(x, y, (i === playIdx && Tone.Transport.state === "started") ? 10 : 4, 0, Math.PI * 2);
+                ctx.fillStyle = val === 1 ? "#ff0055" : "#222";
+                if (i === playIdx && Tone.Transport.state === "started") {
+                    ctx.fillStyle = "#00ffcc";
+                    ctx.shadowBlur = 15; ctx.shadowColor = "#00ffcc";
+                } else { ctx.shadowBlur = 0; }
+                ctx.fill();
+            });
+
+            for (let i = 0; i < 16; i++) {
+                const ang = (i / 16) * Math.PI * 2 - Math.PI / 2;
+                const x = cx + 160 * Math.cos(ang), y = cy + 160 * Math.sin(ang);
+                ctx.beginPath();
+                ctx.arc(x, y, (i === 4 || i === 12) ? 6 : 2, 0, Math.PI * 2);
+                ctx.fillStyle = (i === snareIdx && Tone.Transport.state === "started") ? "#fff" : "#333";
+                ctx.fill();
+            }
+            requestAnimationFrame(render);
+        }
+
+        document.getElementById('playBtn').addEventListener('click', async () => {
+            await Tone.start();
+            if (Tone.Transport.state === "started") {
+                Tone.Transport.stop();
+                playIdx = 0; snareIdx = 0;
+                document.getElementById('playBtn').innerText = "BOOT SYSTEM";
+                document.getElementById('playBtn').classList.remove('active-btn');
+            } else {
+                update();
+                Tone.Transport.start();
+                loop.start(0);
+                document.getElementById('playBtn').innerText = "SYSTEM ACTIVE";
+                document.getElementById('playBtn').classList.add('active-btn');
+            }
+        });
+
+        ['steps', 'pulses', 'rotate', 'bpm'].forEach(id => {
+            document.getElementById(id).addEventListener('input', update);
+        });
+
+        update(); render();
+    </script>
+</body>
+</html>
