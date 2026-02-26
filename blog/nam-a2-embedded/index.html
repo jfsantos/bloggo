@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="">
+    <title>João Felipe Santos | Bringing NAM A2 to Embedded Hardware</title>
+    
+    <link rel="stylesheet" href="https://jfsantos.dev/style.css?h=c59bf21e289e8d31d2b7">
+    
+    
+        
+    
+</head>
+<body>
+    
+<header class="space">
+    <a href="https:&#x2F;&#x2F;jfsantos.dev">&LeftArrow; Home</a>
+</header>
+
+    
+<main>
+    <h1>Bringing NAM A2 to Embedded Hardware</h1>
+    
+    <p class="secondary small">
+        11 February, 2026
+
+        
+        
+        
+
+        
+    </p>
+    
+    <div class="space"></div>
+    <p>Note: this post is a partner post to <a rel="external" href="https://www.tone3000.com/blog/running-nam-on-embedded-hardware">a post I wrote for the Tone3000 blog</a>, with a more in-depth discussion of all the optimizations and results we found.</p>
+<p>We all love NAM, and we want to run our favourite captures EVERYWHERE. And that's what we have been trying to achieve with <a rel="external" href="https://www.neuralampmodeler.com/post/architecture-a2">A2</a>, especially <a rel="external" href="https://www.neuralampmodeler.com/post/introducing-slimmable-nam-neural-amp-models-with-adjustable-runtime-computational-cost">Slimmable models</a>. As part of the development of A2, we are working closely with partners to make sure A2 suits their hardware. We also wanted to have a general idea of what running NAM in hardware platforms with more resources looks like, so we decided to get our hands dirty and implement a simple NAM loader for the <a rel="external" href="https://daisy.audio/hardware/Seed/">Electrosmith Daisy Seed</a> board, which has an ARM Cortex M7 that is currently very popular for DSP applications.</p>
+<insert cute picture of the Daisy Seed on the Pod here>
+<p>The Daisy Seed board has the following specs:</p>
+<ul>
+<li>ARM Cortex M7 running at 480 MHz</li>
+<li>1 MB of SRAM (of which 128 kB are tightly coupled RAM for data)</li>
+<li>8 MB of Flash memory (for firmware/stored models)</li>
+<li>96 kHz stereo codec (we used 48 kHz mono)</li>
+</ul>
+<p>The Daisy Seed has optionally an extra 64 MB of SDRAM, but that RAM is much slower than the onboard SRAM. People usually use that RAM for loopers and delays, not anything that requires super intense realtime math like a neural model… so we ignored it in these experiments.</p>
+<p>To make testing and benchmarking easier, we plugged the Daisy Seed into a Daisy Pod, which is basically a powered breakout board for the Daisy that includes stereo audio I/O, a micro SD card slot, and a couple of knobs. Most important for us was the SD card, as we could load a bunch of NAM models into it and have our benchmarking software run all of them sequentially (and write the logs to the SD card as well).</p>
+<h2 id="challenges">Challenges</h2>
+<p>We already knew from the beginning that memory limitations were strict (and that’s one of the reasons for Slimmable NAM). With 1 MB for both the model weights and any buffers, we are restricted in the size of model we can use. We decided to try a smaller model than A1, known in the community as A1-nano, with a little but important tweak: replacing the tanh activation with a ReLU. Tanh is an expensive operation that requires too much computation, which led the deep learning community to look for cheaper options. ReLU fits the bill here as one of the simplest activation functions that is currently used in lots of AI models.</p>
+<p>While the code in NeuralAmpModelerCore has been battle-tested in the NAM plugin, it was not designed with embedded applications in mind. When we first tried to run it on the Daisy Seed, even with an A1-nano-ReLU model, it would take over 5 seconds of compute time to process 2 seconds of audio... which we should understand would not work for a pedal that is supposed to be doing audio processing in real time.</p>
+<h2 id="optimization-process">Optimization process</h2>
+<p>In order to tackle that issue, we first instrumented the code with profiling to capture how long the code spent on each operation, so we could identify easy targets for optimization. The actual main culprit for the slowdown was <a rel="external" href="https://eigen.tuxfamily.org">Eigen</a>, the library we use for linear algebra, more specifically in how it does matrix multiplications with small matrices and how it allocates temporary memory in embedded devices without an operating system. We added specialized operations for specific sizes of matrices that are used in A1-nano-ReLU, as well as other unrelated optimizations.</p>
+<p>Once we identified all the bottlenecks in the code for the A1-nano-ReLU model, we came up with different optimization tactics. I would love to say that I first implemented microbenchmarks to see which ones really mattered and then I added them to the code, but the real process was actually in reverse: I started by optimizing the actual Core code, then implemented microbenchmarks to better understand what was going on clown-face.</p>
+<p>The microbenchmarks are all available in <a rel="external" href="https://github.com/tone-3000/nam-inference-benchmarks">this repository</a> for reference. These can be used as a reference for your own hardware, if you are implementing an embedded device that runs NAM.</p>
+<h2 id="results">Results</h2>
+<h3 id="micro-benchmark-results-inline-ops-vs-eigen">Micro-benchmark Results: Inline Ops vs Eigen</h3>
+<p>These benchmarks measure individual operations in isolation to guide optimization decisions for the <a rel="external" href="https://github.com/sdatkinson/NeuralAmpModelerCore">NeuralAmpModelerCore</a> WaveNet inference engine. Each section presents results for both platforms side-by-side.</p>
+<h3 id="platforms">Platforms</h3>
+<table><thead><tr><th></th><th>Desktop</th><th>Daisy</th></tr></thead><tbody>
+<tr><td><strong>CPU</strong></td><td>Apple Silicon (Macbook Pro M5)</td><td>ARM Cortex-M7 @ 480 MHz, FTZ=1, DN=1</td></tr>
+<tr><td><strong>Compiler flags</strong></td><td><code>-O3 -ffast-math -march=native -DNDEBUG -std=c++17</code></td><td><code>-O2 -ffast-math -funroll-loops -ftree-vectorize -std=gnu++17</code></td></tr>
+<tr><td><strong>Platform</strong></td><td>macOS</td><td>Electrosmith Daisy Seed (STM32H750, 512 KB SRAM, 128 KB DTCM)</td></tr>
+<tr><td><strong>Eigen parallelization</strong></td><td>Disabled (<code>-DEIGEN_DONT_PARALLELIZE</code>)</td><td>Disabled (<code>-DEIGEN_DONT_PARALLELIZE</code>)</td></tr>
+<tr><td><strong>Timing</strong></td><td><code>std::chrono::high_resolution_clock</code></td><td>DWT CYCCNT (cycle-accurate, zero overhead). 1 cycle = 2.08 ns @ 480 MHz</td></tr>
+<tr><td><strong>Iterations</strong></td><td>5000 (warmup: 100)</td><td>1000 (warmup: 100)</td></tr>
+</tbody></table>
+<hr />
+<h3 id="1-inline-gemm-vs-eigen-gemm">1. Inline GEMM vs Eigen GEMM</h3>
+<p>The 1x1 convolution (<code>Conv1x1</code>) is the single hottest operation in WaveNet inference -- it runs once per layer per frame-block to mix channels. It boils down to a matrix-matrix multiply: <code>(channels_out x channels_in) * (channels_in x frames)</code>. Eigen's general GEMM path allocates temporary panel buffers via <code>malloc</code> on every call, which is fine on desktop but catastrophically slow on Cortex-M7 with newlib. The "inline generic" variant replaces Eigen with a plain triple-loop; the "unrolled" variant fully unrolls the loop at compile time for known dimension pairs (e.g., 4x8), keeping weights in registers.</p>
+<p>Matrix sizes matching typical WaveNet 1x1 convolution dimensions (channels x channels, applied across frames). Each size is measured once: Eigen is benchmarked first, then the inline variant(s) run against that same baseline with the same input data.</p>
+<h4 id="desktop-48-frames">Desktop (48 frames)</h4>
+<table><thead><tr><th>Size</th><th style="text-align: right">Eigen</th><th style="text-align: right">Inline Generic</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td>2x2</td><td style="text-align: right">191.1 ns</td><td style="text-align: right">122.7 ns</td><td style="text-align: right"><strong>1.56x</strong></td></tr>
+<tr><td>4x4</td><td style="text-align: right">196.2 ns</td><td style="text-align: right">519.4 ns</td><td style="text-align: right">0.38x</td></tr>
+<tr><td>4x8</td><td style="text-align: right">230.2 ns</td><td style="text-align: right">1.0 us</td><td style="text-align: right">0.23x</td></tr>
+<tr><td>4x8 (unrolled)</td><td style="text-align: right">230.2 ns</td><td style="text-align: right">75.2 ns</td><td style="text-align: right"><strong>3.06x</strong></td></tr>
+<tr><td>8x4</td><td style="text-align: right">199.8 ns</td><td style="text-align: right">992.9 ns</td><td style="text-align: right">0.20x</td></tr>
+<tr><td>8x8</td><td style="text-align: right">227.4 ns</td><td style="text-align: right">1.6 us</td><td style="text-align: right">0.14x</td></tr>
+<tr><td>8x8 (unrolled)</td><td style="text-align: right">227.4 ns</td><td style="text-align: right">111.6 ns</td><td style="text-align: right"><strong>2.04x</strong></td></tr>
+</tbody></table>
+<h4 id="desktop-2048-frames">Desktop (2048 frames)</h4>
+<table><thead><tr><th>Size</th><th style="text-align: right">Eigen</th><th style="text-align: right">Inline Generic</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td>2x2</td><td style="text-align: right">2.1 us</td><td style="text-align: right">2.3 us</td><td style="text-align: right">0.90x</td></tr>
+<tr><td>4x4</td><td style="text-align: right">2.0 us</td><td style="text-align: right">8.4 us</td><td style="text-align: right">0.24x</td></tr>
+<tr><td>4x8</td><td style="text-align: right">2.4 us</td><td style="text-align: right">18.8 us</td><td style="text-align: right">0.13x</td></tr>
+<tr><td>4x8 (unrolled)</td><td style="text-align: right">2.4 us</td><td style="text-align: right">1.9 us</td><td style="text-align: right"><strong>1.28x</strong></td></tr>
+<tr><td>8x4</td><td style="text-align: right">2.6 us</td><td style="text-align: right">16.8 us</td><td style="text-align: right">0.15x</td></tr>
+<tr><td>8x8</td><td style="text-align: right">3.9 us</td><td style="text-align: right">38.0 us</td><td style="text-align: right">0.10x</td></tr>
+<tr><td>8x8 (unrolled)</td><td style="text-align: right">3.9 us</td><td style="text-align: right">3.4 us</td><td style="text-align: right"><strong>1.15x</strong></td></tr>
+</tbody></table>
+<h4 id="daisy-48-frames">Daisy (48 frames)</h4>
+<table><thead><tr><th>Size</th><th style="text-align: right">Eigen</th><th style="text-align: right">Inline Generic</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td>2x2</td><td style="text-align: right">4044 cyc (8.4 us)</td><td style="text-align: right">2759 cyc (5.7 us)</td><td style="text-align: right"><strong>1.47x</strong></td></tr>
+<tr><td>4x4</td><td style="text-align: right">8117 cyc (16.9 us)</td><td style="text-align: right">7175 cyc (14.9 us)</td><td style="text-align: right"><strong>1.13x</strong></td></tr>
+<tr><td>4x8</td><td style="text-align: right">10657 cyc (22.2 us)</td><td style="text-align: right">9385 cyc (19.6 us)</td><td style="text-align: right"><strong>1.14x</strong></td></tr>
+<tr><td>4x8 (unrolled)</td><td style="text-align: right">10657 cyc (22.2 us)</td><td style="text-align: right">3437 cyc (7.2 us)</td><td style="text-align: right"><strong>3.10x</strong></td></tr>
+<tr><td>8x4</td><td style="text-align: right">14314 cyc (29.8 us)</td><td style="text-align: right">13701 cyc (28.5 us)</td><td style="text-align: right"><strong>1.04x</strong></td></tr>
+<tr><td>8x8</td><td style="text-align: right">19578 cyc (40.8 us)</td><td style="text-align: right">18125 cyc (37.8 us)</td><td style="text-align: right"><strong>1.08x</strong></td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> Generic inline triple-loops lose badly to Eigen (0.10--0.38x) because Eigen leverages NEON SIMD. Fully unrolled compile-time specializations beat Eigen at all sizes and frame counts (1.15--3.06x), with the largest wins at small frame counts where Eigen's setup overhead is proportionally larger.</p>
+<p><strong>Daisy:</strong> Inline GEMM beats Eigen at every size because Eigen's general GEMM path calls <code>malloc</code>/<code>free</code> for panel buffer allocation on every invocation. The generic triple-loop wins by 1.04--1.47x. The fully unrolled 4x8 specialization (weights loaded into registers) wins by 3.10x -- the biggest single optimization in the entire WaveNet pipeline.</p>
+<hr />
+<h3 id="1b-dtcm-memory-placement-effect-on-gemm-daisy-only">1b. DTCM Memory Placement Effect on GEMM (Daisy only)</h3>
+<p>The STM32H750 has 128 KB of DTCM (Data Tightly-Coupled Memory) that provides single-cycle, deterministic access -- no cache misses, no wait states. Production code copies model weights into DTCM to avoid cache eviction during the full WaveNet pipeline. This benchmark isolates the question: does DTCM placement speed up the GEMM kernel itself, or is the benefit only about avoiding interference from other data?</p>
+<h4 id="generic-inline-gemm">Generic Inline GEMM</h4>
+<table><thead><tr><th>Size</th><th style="text-align: right">SRAM (baseline)</th><th style="text-align: right">DTCM weight</th><th style="text-align: right">Speedup</th><th style="text-align: right">DTCM both</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td>2x2</td><td style="text-align: right">2758 cyc (5.7 us)</td><td style="text-align: right">2763 cyc (5.8 us)</td><td style="text-align: right">1.00x</td><td style="text-align: right">2897 cyc (6.0 us)</td><td style="text-align: right">0.95x</td></tr>
+<tr><td>4x4</td><td style="text-align: right">7173 cyc (14.9 us)</td><td style="text-align: right">7179 cyc (15.0 us)</td><td style="text-align: right">1.00x</td><td style="text-align: right">7316 cyc (15.2 us)</td><td style="text-align: right">0.98x</td></tr>
+<tr><td>4x8</td><td style="text-align: right">9384 cyc (19.6 us)</td><td style="text-align: right">9390 cyc (19.6 us)</td><td style="text-align: right">1.00x</td><td style="text-align: right">9528 cyc (19.9 us)</td><td style="text-align: right">0.98x</td></tr>
+<tr><td>8x8</td><td style="text-align: right">18125 cyc (37.8 us)</td><td style="text-align: right">18136 cyc (37.8 us)</td><td style="text-align: right">1.00x</td><td style="text-align: right">18285 cyc (38.1 us)</td><td style="text-align: right">0.99x</td></tr>
+</tbody></table>
+<h4 id="unrolled-4x8-gemm">Unrolled 4x8 GEMM</h4>
+<table><thead><tr><th>Variant</th><th style="text-align: right">Cycles</th><th style="text-align: right">Speedup vs SRAM</th></tr></thead><tbody>
+<tr><td>SRAM (baseline)</td><td style="text-align: right">3437 cyc (7.2 us)</td><td style="text-align: right">--</td></tr>
+<tr><td>DTCM weight only</td><td style="text-align: right">3555 cyc (7.4 us)</td><td style="text-align: right">0.97x</td></tr>
+<tr><td>DTCM weight + input</td><td style="text-align: right">3430 cyc (7.1 us)</td><td style="text-align: right">1.00x</td></tr>
+</tbody></table>
+<p><strong>Daisy:</strong> DTCM placement has no measurable benefit for GEMM operands. In some cases it is marginally <em>slower</em> (up to 5%). The Cortex-M7's D-cache achieves near-single-cycle latency for hot data that fits in cache, and these small weight matrices (64--256 bytes) are always cache-hot after warmup. DTCM's advantage is <em>deterministic</em> latency (no cold-start misses), not throughput for steady-state computation. The production DTCM weight copy remains justified for avoiding cache eviction by other data in the full WaveNet pipeline, but the GEMM kernel itself sees no benefit in isolation. This benchmark is <em>not</em> super representative of real-world usage, as we'd often be juggling multiple operations and invalidating the cache.</p>
+<hr />
+<h3 id="2-effect-of-restrict-on-inline-gemm">2. Effect of <code>__restrict__</code> on Inline GEMM</h3>
+<p>The <code>__restrict__</code> qualifier tells the compiler that pointers don't alias, theoretically enabling more aggressive load/store reordering and vectorization in tight loops. Since our inline GEMM reads from two input matrices and writes to a third, aliasing analysis could matter. Both versions use <code>noinline</code> to prevent the compiler from deducing non-aliasing from calling context, isolating the effect of the qualifier itself.</p>
+<h4 id="desktop-48-frames-1">Desktop (48 frames)</h4>
+<table><thead><tr><th>Size</th><th style="text-align: right">Without <code>__restrict__</code></th><th style="text-align: right">With <code>__restrict__</code></th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td>4x4 (generic)</td><td style="text-align: right">446.8 ns</td><td style="text-align: right">464.8 ns</td><td style="text-align: right">0.96x</td></tr>
+<tr><td>4x8 (generic)</td><td style="text-align: right">916.4 ns</td><td style="text-align: right">1.1 us</td><td style="text-align: right">0.83x</td></tr>
+<tr><td>8x8 (generic)</td><td style="text-align: right">1.5 us</td><td style="text-align: right">1.5 us</td><td style="text-align: right">1.00x</td></tr>
+<tr><td>4x8 (unrolled)</td><td style="text-align: right">36.4 ns</td><td style="text-align: right">36.3 ns</td><td style="text-align: right">1.00x</td></tr>
+</tbody></table>
+<h4 id="desktop-2048-frames-1">Desktop (2048 frames)</h4>
+<table><thead><tr><th>Size</th><th style="text-align: right">Without <code>__restrict__</code></th><th style="text-align: right">With <code>__restrict__</code></th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td>4x4 (generic)</td><td style="text-align: right">10.1 us</td><td style="text-align: right">8.5 us</td><td style="text-align: right"><strong>1.19x</strong></td></tr>
+<tr><td>4x8 (generic)</td><td style="text-align: right">21.1 us</td><td style="text-align: right">20.4 us</td><td style="text-align: right">1.03x</td></tr>
+<tr><td>8x8 (generic)</td><td style="text-align: right">41.0 us</td><td style="text-align: right">41.6 us</td><td style="text-align: right">0.99x</td></tr>
+<tr><td>4x8 (unrolled)</td><td style="text-align: right">1.9 us</td><td style="text-align: right">1.9 us</td><td style="text-align: right">1.01x</td></tr>
+</tbody></table>
+<h4 id="daisy-48-frames-1">Daisy (48 frames)</h4>
+<table><thead><tr><th>Size</th><th style="text-align: right">Without <code>__restrict__</code></th><th style="text-align: right">With <code>__restrict__</code></th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td>4x4</td><td style="text-align: right">7172 cyc (14.9 us)</td><td style="text-align: right">7174 cyc (14.9 us)</td><td style="text-align: right">1.00x</td></tr>
+<tr><td>4x8</td><td style="text-align: right">9384 cyc (19.5 us)</td><td style="text-align: right">9385 cyc (19.6 us)</td><td style="text-align: right">1.00x</td></tr>
+<tr><td>8x8</td><td style="text-align: right">18125 cyc (37.8 us)</td><td style="text-align: right">18126 cyc (37.8 us)</td><td style="text-align: right">1.00x</td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> <code>__restrict__</code> has negligible effect in most cases. The compiler already deduces non-aliasing. The one outlier (4x4 at 2048 frames, 1.19x) is likely noise or a minor alignment effect.</p>
+<p><strong>Daisy:</strong> Zero measurable effect, same as desktop. The compiler already deduces non-aliasing regardless of platform.</p>
+<hr />
+<h3 id="3-std-memcpy-vs-eigen-block-assignment">3. <code>std::memcpy</code> vs Eigen Block Assignment</h3>
+<p>WaveNet layers frequently copy intermediate activation buffers -- for example, saving the pre-activation state for the residual path, or copying gated outputs into the next layer's input. These are contiguous matrix copies (all elements in one flat buffer). The question is whether a plain <code>std::memcpy</code> or Eigen's block assignment (<code>.leftCols() = ...</code>) generates faster code, given that <code>memcpy</code> quality varies dramatically across C libraries.</p>
+<h4 id="desktop-48-frames-2">Desktop (48 frames)</h4>
+<table><thead><tr><th style="text-align: right">Rows</th><th style="text-align: right">Eigen block assign</th><th style="text-align: right">std::memcpy</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">2</td><td style="text-align: right">25.1 ns</td><td style="text-align: right">20.6 ns</td><td style="text-align: right"><strong>1.21x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">25.9 ns</td><td style="text-align: right">27.1 ns</td><td style="text-align: right">0.96x</td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">37.6 ns</td><td style="text-align: right">32.9 ns</td><td style="text-align: right"><strong>1.14x</strong></td></tr>
+<tr><td style="text-align: right">16</td><td style="text-align: right">79.9 ns</td><td style="text-align: right">49.9 ns</td><td style="text-align: right"><strong>1.60x</strong></td></tr>
+</tbody></table>
+<h4 id="desktop-2048-frames-2">Desktop (2048 frames)</h4>
+<table><thead><tr><th style="text-align: right">Rows</th><th style="text-align: right">Eigen block assign</th><th style="text-align: right">std::memcpy</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">2</td><td style="text-align: right">379.2 ns</td><td style="text-align: right">219.6 ns</td><td style="text-align: right"><strong>1.73x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">767.8 ns</td><td style="text-align: right">375.6 ns</td><td style="text-align: right"><strong>2.04x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">1.2 us</td><td style="text-align: right">571.1 ns</td><td style="text-align: right"><strong>2.15x</strong></td></tr>
+<tr><td style="text-align: right">16</td><td style="text-align: right">2.0 us</td><td style="text-align: right">1.3 us</td><td style="text-align: right"><strong>1.60x</strong></td></tr>
+</tbody></table>
+<h4 id="daisy-48-frames-2">Daisy (48 frames)</h4>
+<table><thead><tr><th style="text-align: right">Rows</th><th style="text-align: right">Eigen block assign</th><th style="text-align: right">std::memcpy</th><th style="text-align: right">memcpy Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4</td><td style="text-align: right">379 cyc (0.79 us)</td><td style="text-align: right">1636 cyc (3.4 us)</td><td style="text-align: right">0.23x</td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">715 cyc (1.5 us)</td><td style="text-align: right">3175 cyc (6.6 us)</td><td style="text-align: right">0.23x</td></tr>
+<tr><td style="text-align: right">16</td><td style="text-align: right">1344 cyc (2.8 us)</td><td style="text-align: right">6248 cyc (13.0 us)</td><td style="text-align: right">0.22x</td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> <code>std::memcpy</code> consistently beats Eigen block assignment, with the gap widening at larger sizes (up to 2.15x). The platform's highly optimized <code>memcpy</code> implementation (NEON/AVX) outperforms Eigen's generated stores.</p>
+<p><strong>Daisy:</strong> The opposite of desktop -- Eigen block assignment is 4.3--4.6x faster than <code>std::memcpy</code>. Newlib's <code>memcpy</code> implementation is not optimized for the Cortex-M7's AXI bus and D-cache; Eigen's generated code likely uses more efficient register-width stores.</p>
+<hr />
+<h3 id="4-element-wise-operations-unrolled-loop-vs-eigen">4. Element-wise Operations: Unrolled Loop vs Eigen</h3>
+<p>Element-wise addition and accumulation appear throughout WaveNet: skip connections sum layer outputs (<code>z = a + b</code>), and residual connections accumulate into a running buffer (<code>dst += src</code>). Eigen uses expression templates that defer evaluation and fuse operations, but for simple element-wise ops the template machinery may add overhead compared to a plain loop that the compiler can auto-vectorize directly.</p>
+<h4 id="desktop-addition-z-a-b">Desktop -- Addition (z = a + b)</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen</th><th style="text-align: right">Unrolled</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">34.4 ns</td><td style="text-align: right">32.9 ns</td><td style="text-align: right">1.04x</td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">63.9 ns</td><td style="text-align: right">60.4 ns</td><td style="text-align: right">1.06x</td></tr>
+<tr><td style="text-align: right">16</td><td style="text-align: right">48</td><td style="text-align: right">100.9 ns</td><td style="text-align: right">73.2 ns</td><td style="text-align: right"><strong>1.38x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">2048</td><td style="text-align: right">824.9 ns</td><td style="text-align: right">541.1 ns</td><td style="text-align: right"><strong>1.52x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">2048</td><td style="text-align: right">1.4 us</td><td style="text-align: right">903.5 ns</td><td style="text-align: right"><strong>1.51x</strong></td></tr>
+<tr><td style="text-align: right">16</td><td style="text-align: right">2048</td><td style="text-align: right">3.2 us</td><td style="text-align: right">2.7 us</td><td style="text-align: right"><strong>1.19x</strong></td></tr>
+</tbody></table>
+<h4 id="desktop-accumulation-dst-src">Desktop -- Accumulation (dst += src)</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen</th><th style="text-align: right">Unrolled</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">43.0 ns</td><td style="text-align: right">31.7 ns</td><td style="text-align: right"><strong>1.36x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">95.6 ns</td><td style="text-align: right">64.9 ns</td><td style="text-align: right"><strong>1.47x</strong></td></tr>
+<tr><td style="text-align: right">16</td><td style="text-align: right">48</td><td style="text-align: right">208.1 ns</td><td style="text-align: right">141.3 ns</td><td style="text-align: right"><strong>1.47x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">2048</td><td style="text-align: right">736.8 ns</td><td style="text-align: right">594.0 ns</td><td style="text-align: right"><strong>1.24x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">2048</td><td style="text-align: right">2.3 us</td><td style="text-align: right">2.3 us</td><td style="text-align: right">1.02x</td></tr>
+<tr><td style="text-align: right">16</td><td style="text-align: right">2048</td><td style="text-align: right">3.9 us</td><td style="text-align: right">3.9 us</td><td style="text-align: right">1.01x</td></tr>
+</tbody></table>
+<h4 id="daisy-addition-z-a-b-48-frames">Daisy -- Addition (z = a + b, 48 frames)</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen <code>a + b</code></th><th style="text-align: right">Unrolled loop</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">756 cyc (1.6 us)</td><td style="text-align: right">698 cyc (1.5 us)</td><td style="text-align: right"><strong>1.08x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">1454 cyc (3.0 us)</td><td style="text-align: right">1346 cyc (2.8 us)</td><td style="text-align: right"><strong>1.08x</strong></td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> Unrolled loops are 1.0--1.5x faster for element-wise ops, with bigger wins at small/medium buffer sizes typical of real-time audio. Accumulation shows larger gains at small frame counts.</p>
+<p><strong>Daisy:</strong> Unrolled loops are modestly faster (1.08x), consistent with desktop results at 48 frames. The savings per call are small (~100--120 cycles) but accumulate over many WaveNet layers.</p>
+<hr />
+<h3 id="5-bias-broadcast-unrolled-vs-eigen-colwise">5. Bias Broadcast: Unrolled vs Eigen <code>colwise()</code></h3>
+<p>Every convolution layer adds a per-channel bias vector after the matrix multiply: each element of the bias is broadcast across all frames in that channel's row. Eigen provides <code>colwise()</code> for this pattern; the alternative is a hand-written loop that iterates over channels and uses pointer arithmetic to stride across frames.</p>
+<h4 id="desktop">Desktop</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen <code>colwise()</code></th><th style="text-align: right">Unrolled</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">2</td><td style="text-align: right">48</td><td style="text-align: right">77.2 ns</td><td style="text-align: right">71.3 ns</td><td style="text-align: right">1.08x</td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">60.4 ns</td><td style="text-align: right">57.3 ns</td><td style="text-align: right">1.05x</td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">99.3 ns</td><td style="text-align: right">87.3 ns</td><td style="text-align: right"><strong>1.14x</strong></td></tr>
+<tr><td style="text-align: right">2</td><td style="text-align: right">2048</td><td style="text-align: right">1.7 us</td><td style="text-align: right">1.2 us</td><td style="text-align: right"><strong>1.38x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">2048</td><td style="text-align: right">1.0 us</td><td style="text-align: right">630.5 ns</td><td style="text-align: right"><strong>1.66x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">2048</td><td style="text-align: right">1.6 us</td><td style="text-align: right">1.3 us</td><td style="text-align: right"><strong>1.24x</strong></td></tr>
+</tbody></table>
+<h4 id="daisy-48-frames-3">Daisy (48 frames)</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen <code>colwise()</code></th><th style="text-align: right">Unrolled loop</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">3541 cyc (7.4 us)</td><td style="text-align: right">3744 cyc (7.8 us)</td><td style="text-align: right">0.95x</td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">5721 cyc (11.9 us)</td><td style="text-align: right">5838 cyc (12.2 us)</td><td style="text-align: right">0.98x</td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> Unrolled bias broadcast is 1.05--1.66x faster than Eigen's <code>colwise()</code>, with larger wins at higher frame counts.</p>
+<p><strong>Daisy:</strong> Eigen wins by 2--5%, reversing the desktop result. Eigen's <code>colwise()</code> likely generates tighter scalar code on ARM than the hand-written loop. Keep Eigen for bias broadcast on Daisy.</p>
+<hr />
+<h3 id="6-hardswish-branchy-vs-branchless">6. Hardswish: Branchy vs Branchless</h3>
+<p>Hardswish is a piecewise activation function with three regions: <code>0</code> for <code>x &lt;= -3</code>, <code>x</code> for <code>x &gt;= 3</code>, and <code>x * (x + 3) / 6</code> in between. The naive implementation uses <code>if/else</code> branches, which cause pipeline stalls from misprediction when inputs span all three regions (as they do in typical WaveNet activations). The branchless version uses <code>fmin</code>/<code>fmax</code> to compute the same result without conditional jumps. Input values are uniformly distributed in [-5, 5] to trigger worst-case branch misprediction.</p>
+<h4 id="desktop-1">Desktop</h4>
+<table><thead><tr><th style="text-align: right">n</th><th style="text-align: right">Branchy</th><th style="text-align: right">Branchless</th><th style="text-align: right">Unrolled</th><th style="text-align: right">Branchless Speedup</th><th style="text-align: right">Max Error</th></tr></thead><tbody>
+<tr><td style="text-align: right">192</td><td style="text-align: right">109.6 ns</td><td style="text-align: right">35.8 ns</td><td style="text-align: right">49.4 ns</td><td style="text-align: right"><strong>3.06x</strong></td><td style="text-align: right">4.77e-07</td></tr>
+<tr><td style="text-align: right">384</td><td style="text-align: right">247.4 ns</td><td style="text-align: right">73.2 ns</td><td style="text-align: right">86.2 ns</td><td style="text-align: right"><strong>3.38x</strong></td><td style="text-align: right">4.77e-07</td></tr>
+<tr><td style="text-align: right">8192</td><td style="text-align: right">6.0 us</td><td style="text-align: right">854.4 ns</td><td style="text-align: right">1.2 us</td><td style="text-align: right"><strong>6.97x</strong></td><td style="text-align: right">4.77e-07</td></tr>
+<tr><td style="text-align: right">16384</td><td style="text-align: right">9.6 us</td><td style="text-align: right">1.7 us</td><td style="text-align: right">2.4 us</td><td style="text-align: right"><strong>5.73x</strong></td><td style="text-align: right">4.77e-07</td></tr>
+<tr><td style="text-align: right">32768</td><td style="text-align: right">21.2 us</td><td style="text-align: right">4.5 us</td><td style="text-align: right">5.9 us</td><td style="text-align: right"><strong>4.76x</strong></td><td style="text-align: right">4.77e-07</td></tr>
+</tbody></table>
+<h4 id="daisy">Daisy</h4>
+<table><thead><tr><th style="text-align: right">n</th><th style="text-align: right">Branchy (if/else)</th><th style="text-align: right">Branchless + unrolled</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">192</td><td style="text-align: right">6248 cyc (13.0 us)</td><td style="text-align: right">5209 cyc (10.9 us)</td><td style="text-align: right"><strong>1.20x</strong></td></tr>
+<tr><td style="text-align: right">384</td><td style="text-align: right">12413 cyc (25.9 us)</td><td style="text-align: right">10245 cyc (21.3 us)</td><td style="text-align: right"><strong>1.21x</strong></td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> Branchless hardswish is 3--7x faster than the branchy version. The simple branchless scalar loop actually beats the manually unrolled variant -- the compiler auto-vectorizes the scalar version more effectively.</p>
+<p><strong>Daisy:</strong> Branchless hardswish is 1.20--1.21x faster, a much smaller win than desktop. The Cortex-M7 branch predictor handles the 3-region pattern better than expected, and without SIMD the branchless version can't exploit vectorization. Still worth using since it's a consistent 20% improvement.</p>
+<hr />
+<h3 id="7-activation-loop-unrolling-1-wide-vs-4-wide">7. Activation Loop Unrolling (1-wide vs 4-wide)</h3>
+<p>Activation functions are applied element-wise to every value in the activation buffer after each convolution. Manual 4-wide unrolling processes four elements per loop iteration, giving the compiler explicit instruction-level parallelism (ILP) and aligning with SIMD register widths (4 floats = 1 SSE/NEON register). The benefit depends on whether the activation is compute-bound (cheap ops like ReLU) or latency-bound (expensive ops like <code>expf</code> in Sigmoid/SiLU).</p>
+<h4 id="desktop-2">Desktop</h4>
+<table><thead><tr><th>Activation</th><th style="text-align: right">n</th><th style="text-align: right">1-wide</th><th style="text-align: right">4-wide</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td>ReLU</td><td style="text-align: right">192</td><td style="text-align: right">58.0 ns</td><td style="text-align: right">58.1 ns</td><td style="text-align: right">1.00x</td></tr>
+<tr><td>ReLU</td><td style="text-align: right">384</td><td style="text-align: right">105.5 ns</td><td style="text-align: right">88.3 ns</td><td style="text-align: right"><strong>1.19x</strong></td></tr>
+<tr><td>ReLU</td><td style="text-align: right">16384</td><td style="text-align: right">2.9 us</td><td style="text-align: right">2.0 us</td><td style="text-align: right"><strong>1.44x</strong></td></tr>
+<tr><td>Sigmoid</td><td style="text-align: right">192</td><td style="text-align: right">317.2 ns</td><td style="text-align: right">313.6 ns</td><td style="text-align: right">1.01x</td></tr>
+<tr><td>Sigmoid</td><td style="text-align: right">384</td><td style="text-align: right">645.5 ns</td><td style="text-align: right">612.8 ns</td><td style="text-align: right">1.05x</td></tr>
+<tr><td>Sigmoid</td><td style="text-align: right">16384</td><td style="text-align: right">18.0 us</td><td style="text-align: right">16.2 us</td><td style="text-align: right"><strong>1.11x</strong></td></tr>
+<tr><td>SiLU</td><td style="text-align: right">192</td><td style="text-align: right">188.6 ns</td><td style="text-align: right">191.4 ns</td><td style="text-align: right">0.99x</td></tr>
+<tr><td>SiLU</td><td style="text-align: right">384</td><td style="text-align: right">390.5 ns</td><td style="text-align: right">393.5 ns</td><td style="text-align: right">0.99x</td></tr>
+<tr><td>SiLU</td><td style="text-align: right">16384</td><td style="text-align: right">16.5 us</td><td style="text-align: right">16.5 us</td><td style="text-align: right">0.99x</td></tr>
+<tr><td>Softsign</td><td style="text-align: right">192</td><td style="text-align: right">19.5 ns</td><td style="text-align: right">19.1 ns</td><td style="text-align: right">1.02x</td></tr>
+<tr><td>Softsign</td><td style="text-align: right">384</td><td style="text-align: right">35.6 ns</td><td style="text-align: right">34.1 ns</td><td style="text-align: right">1.04x</td></tr>
+<tr><td>Softsign</td><td style="text-align: right">16384</td><td style="text-align: right">1.6 us</td><td style="text-align: right">1.5 us</td><td style="text-align: right">1.05x</td></tr>
+</tbody></table>
+<h4 id="daisy-1">Daisy</h4>
+<table><thead><tr><th>Activation</th><th style="text-align: right">n</th><th style="text-align: right">1-wide</th><th style="text-align: right">4-wide</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td>ReLU</td><td style="text-align: right">384</td><td style="text-align: right">4269 cyc (8.9 us)</td><td style="text-align: right">3918 cyc (8.2 us)</td><td style="text-align: right"><strong>1.09x</strong></td></tr>
+<tr><td>Sigmoid</td><td style="text-align: right">384</td><td style="text-align: right">47625 cyc (99.2 us)</td><td style="text-align: right">47325 cyc (98.6 us)</td><td style="text-align: right">1.01x</td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> Manual 4-wide unrolling helps ReLU (up to 1.44x) but has negligible effect on transcendental-heavy activations (Sigmoid, SiLU) where <code>expf</code> dominates the cost. Softsign is already fast enough that unrolling provides no meaningful benefit.</p>
+<p><strong>Daisy:</strong> A modest 9% win for ReLU, consistent with desktop at n=384. Sigmoid is dominated by <code>expf</code> cost (~124 cycles/element), making unrolling irrelevant.</p>
+<hr />
+<h3 id="8-lut-activation-vs-computed-expf">8. LUT Activation vs Computed (<code>expf</code>)</h3>
+<p>Sigmoid, SiLU, and Tanh all depend on <code>expf()</code>, which is the single most expensive scalar operation in WaveNet inference (~124 cycles per element on Cortex-M7). A lookup table (LUT) pre-computes the activation over a fixed input range, then uses linear interpolation between table entries at runtime -- replacing the <code>expf</code> call with an array index, a multiply, and an add. The tradeoff is a small approximation error that depends on table size. The computed baseline is measured once per activation/size and shared across all LUT sizes.</p>
+<h4 id="desktop-n-192">Desktop (n = 192)</h4>
+<table><thead><tr><th>Activation</th><th style="text-align: center">LUT Size</th><th style="text-align: right">Computed</th><th style="text-align: right">LUT + lerp</th><th style="text-align: right">Speedup</th><th style="text-align: right">Max Error</th></tr></thead><tbody>
+<tr><td>Sigmoid</td><td style="text-align: center">256</td><td style="text-align: right">512.1 ns</td><td style="text-align: right">275.2 ns</td><td style="text-align: right"><strong>1.86x</strong></td><td style="text-align: right">7.39e-05</td></tr>
+<tr><td>Sigmoid</td><td style="text-align: center">1024</td><td style="text-align: right">512.1 ns</td><td style="text-align: right">257.5 ns</td><td style="text-align: right"><strong>1.99x</strong></td><td style="text-align: right">4.59e-06</td></tr>
+<tr><td>Sigmoid</td><td style="text-align: center">2048</td><td style="text-align: right">512.1 ns</td><td style="text-align: right">256.5 ns</td><td style="text-align: right"><strong>2.00x</strong></td><td style="text-align: right">1.19e-06</td></tr>
+<tr><td>SiLU</td><td style="text-align: center">256</td><td style="text-align: right">452.6 ns</td><td style="text-align: right">255.8 ns</td><td style="text-align: right"><strong>1.77x</strong></td><td style="text-align: right">3.80e-04</td></tr>
+<tr><td>SiLU</td><td style="text-align: center">1024</td><td style="text-align: right">452.6 ns</td><td style="text-align: right">256.9 ns</td><td style="text-align: right"><strong>1.76x</strong></td><td style="text-align: right">2.32e-05</td></tr>
+<tr><td>SiLU</td><td style="text-align: center">2048</td><td style="text-align: right">452.6 ns</td><td style="text-align: right">227.9 ns</td><td style="text-align: right"><strong>1.99x</strong></td><td style="text-align: right">6.24e-06</td></tr>
+<tr><td>Tanh</td><td style="text-align: center">256</td><td style="text-align: right">495.8 ns</td><td style="text-align: right">200.0 ns</td><td style="text-align: right"><strong>2.48x</strong></td><td style="text-align: right">5.79e-04</td></tr>
+<tr><td>Tanh</td><td style="text-align: center">1024</td><td style="text-align: right">495.8 ns</td><td style="text-align: right">197.7 ns</td><td style="text-align: right"><strong>2.51x</strong></td><td style="text-align: right">3.63e-05</td></tr>
+<tr><td>Tanh</td><td style="text-align: center">2048</td><td style="text-align: right">495.8 ns</td><td style="text-align: right">197.6 ns</td><td style="text-align: right"><strong>2.51x</strong></td><td style="text-align: right">9.00e-06</td></tr>
+</tbody></table>
+<h4 id="desktop-n-384">Desktop (n = 384)</h4>
+<table><thead><tr><th>Activation</th><th style="text-align: center">LUT Size</th><th style="text-align: right">Computed</th><th style="text-align: right">LUT + lerp</th><th style="text-align: right">Speedup</th><th style="text-align: right">Max Error</th></tr></thead><tbody>
+<tr><td>Sigmoid</td><td style="text-align: center">256</td><td style="text-align: right">677.2 ns</td><td style="text-align: right">359.5 ns</td><td style="text-align: right"><strong>1.88x</strong></td><td style="text-align: right">7.38e-05</td></tr>
+<tr><td>Sigmoid</td><td style="text-align: center">1024</td><td style="text-align: right">677.2 ns</td><td style="text-align: right">359.6 ns</td><td style="text-align: right"><strong>1.88x</strong></td><td style="text-align: right">4.63e-06</td></tr>
+<tr><td>Sigmoid</td><td style="text-align: center">2048</td><td style="text-align: right">677.2 ns</td><td style="text-align: right">349.8 ns</td><td style="text-align: right"><strong>1.94x</strong></td><td style="text-align: right">1.25e-06</td></tr>
+<tr><td>SiLU</td><td style="text-align: center">256</td><td style="text-align: right">577.9 ns</td><td style="text-align: right">328.1 ns</td><td style="text-align: right"><strong>1.76x</strong></td><td style="text-align: right">3.83e-04</td></tr>
+<tr><td>SiLU</td><td style="text-align: center">1024</td><td style="text-align: right">577.9 ns</td><td style="text-align: right">307.8 ns</td><td style="text-align: right"><strong>1.88x</strong></td><td style="text-align: right">2.38e-05</td></tr>
+<tr><td>SiLU</td><td style="text-align: center">2048</td><td style="text-align: right">577.9 ns</td><td style="text-align: right">308.3 ns</td><td style="text-align: right"><strong>1.87x</strong></td><td style="text-align: right">6.36e-06</td></tr>
+<tr><td>Tanh</td><td style="text-align: center">256</td><td style="text-align: right">693.8 ns</td><td style="text-align: right">298.1 ns</td><td style="text-align: right"><strong>2.33x</strong></td><td style="text-align: right">5.70e-04</td></tr>
+<tr><td>Tanh</td><td style="text-align: center">1024</td><td style="text-align: right">693.8 ns</td><td style="text-align: right">286.3 ns</td><td style="text-align: right"><strong>2.42x</strong></td><td style="text-align: right">3.71e-05</td></tr>
+<tr><td>Tanh</td><td style="text-align: center">2048</td><td style="text-align: right">693.8 ns</td><td style="text-align: right">286.5 ns</td><td style="text-align: right"><strong>2.42x</strong></td><td style="text-align: right">9.24e-06</td></tr>
+</tbody></table>
+<h4 id="desktop-n-16384">Desktop (n = 16384)</h4>
+<table><thead><tr><th>Activation</th><th style="text-align: center">LUT Size</th><th style="text-align: right">Computed</th><th style="text-align: right">LUT + lerp</th><th style="text-align: right">Speedup</th><th style="text-align: right">Max Error</th></tr></thead><tbody>
+<tr><td>Sigmoid</td><td style="text-align: center">256</td><td style="text-align: right">16.7 us</td><td style="text-align: right">9.4 us</td><td style="text-align: right"><strong>1.77x</strong></td><td style="text-align: right">7.41e-05</td></tr>
+<tr><td>Sigmoid</td><td style="text-align: center">1024</td><td style="text-align: right">16.7 us</td><td style="text-align: right">9.6 us</td><td style="text-align: right"><strong>1.74x</strong></td><td style="text-align: right">4.75e-06</td></tr>
+<tr><td>Sigmoid</td><td style="text-align: center">2048</td><td style="text-align: right">16.7 us</td><td style="text-align: right">9.7 us</td><td style="text-align: right"><strong>1.71x</strong></td><td style="text-align: right">1.31e-06</td></tr>
+<tr><td>SiLU</td><td style="text-align: center">256</td><td style="text-align: right">16.3 us</td><td style="text-align: right">9.5 us</td><td style="text-align: right"><strong>1.71x</strong></td><td style="text-align: right">3.85e-04</td></tr>
+<tr><td>SiLU</td><td style="text-align: center">1024</td><td style="text-align: right">16.3 us</td><td style="text-align: right">9.6 us</td><td style="text-align: right"><strong>1.69x</strong></td><td style="text-align: right">2.45e-05</td></tr>
+<tr><td>SiLU</td><td style="text-align: center">2048</td><td style="text-align: right">16.3 us</td><td style="text-align: right">9.7 us</td><td style="text-align: right"><strong>1.68x</strong></td><td style="text-align: right">6.57e-06</td></tr>
+<tr><td>Tanh</td><td style="text-align: center">256</td><td style="text-align: right">24.4 us</td><td style="text-align: right">9.5 us</td><td style="text-align: right"><strong>2.56x</strong></td><td style="text-align: right">5.91e-04</td></tr>
+<tr><td>Tanh</td><td style="text-align: center">1024</td><td style="text-align: right">24.4 us</td><td style="text-align: right">9.7 us</td><td style="text-align: right"><strong>2.52x</strong></td><td style="text-align: right">3.71e-05</td></tr>
+<tr><td>Tanh</td><td style="text-align: center">2048</td><td style="text-align: right">24.4 us</td><td style="text-align: right">9.7 us</td><td style="text-align: right"><strong>2.50x</strong></td><td style="text-align: right">9.83e-06</td></tr>
+</tbody></table>
+<h4 id="daisy-n-384">Daisy (n = 384)</h4>
+<table><thead><tr><th>Activation</th><th style="text-align: right">n</th><th style="text-align: center">LUT Size</th><th style="text-align: right">Computed</th><th style="text-align: right">LUT + lerp</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td>SiLU</td><td style="text-align: right">384</td><td style="text-align: center">2048</td><td style="text-align: right">47552 cyc (99.1 us)</td><td style="text-align: right">16901 cyc (35.2 us)</td><td style="text-align: right"><strong>2.81x</strong></td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> LUT + linear interpolation is 1.7--2.6x faster than computed <code>expf</code>. A 1024-point table offers a good speed/accuracy tradeoff (~5e-06 max error). Tanh benefits the most since it evaluates two <code>expf</code> calls per element.</p>
+<p><strong>Daisy:</strong> LUT + linear interpolation is 2.81x faster than computed SiLU, a larger win than desktop (1.87x for SiLU at n=384). The bigger gap reflects the higher relative cost of <code>expf</code> on Cortex-M7 (~124 cyc/element computed vs ~44 cyc/element LUT).</p>
+<hr />
+<h3 id="9-strided-sub-matrix-copy-desktop-only">9. Strided Sub-matrix Copy (Desktop only)</h3>
+<p>WaveNet's gated activation splits a 2N-channel activation into two N-channel halves (for the sigmoid gate and tanh path). When the source matrix has 2N rows but the destination has N rows, source and destination have different column strides in memory, so a simple <code>memcpy</code> won't work. Eigen's <code>.topRows().leftCols()</code> handles this via expression templates; the manual version uses explicit pointer arithmetic to copy row-by-row with the correct strides.</p>
+<h4 id="desktop-3">Desktop</h4>
+<table><thead><tr><th style="text-align: right">Rows</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen <code>.topRows()</code></th><th style="text-align: right">Manual stride copy</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4-&gt;2</td><td style="text-align: right">48</td><td style="text-align: right">75.9 ns</td><td style="text-align: right">21.7 ns</td><td style="text-align: right"><strong>3.50x</strong></td></tr>
+<tr><td style="text-align: right">8-&gt;4</td><td style="text-align: right">48</td><td style="text-align: right">68.2 ns</td><td style="text-align: right">18.3 ns</td><td style="text-align: right"><strong>3.72x</strong></td></tr>
+<tr><td style="text-align: right">16-&gt;8</td><td style="text-align: right">48</td><td style="text-align: right">76.5 ns</td><td style="text-align: right">21.9 ns</td><td style="text-align: right"><strong>3.49x</strong></td></tr>
+<tr><td style="text-align: right">4-&gt;2</td><td style="text-align: right">2048</td><td style="text-align: right">2.3 us</td><td style="text-align: right">659.1 ns</td><td style="text-align: right"><strong>3.56x</strong></td></tr>
+<tr><td style="text-align: right">8-&gt;4</td><td style="text-align: right">2048</td><td style="text-align: right">2.2 us</td><td style="text-align: right">491.4 ns</td><td style="text-align: right"><strong>4.54x</strong></td></tr>
+<tr><td style="text-align: right">16-&gt;8</td><td style="text-align: right">2048</td><td style="text-align: right">2.5 us</td><td style="text-align: right">868.8 ns</td><td style="text-align: right"><strong>2.90x</strong></td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> Manual strided copy is 2.9--4.5x faster than Eigen's <code>.topRows().leftCols()</code>. Eigen's expression template overhead dominates for non-contiguous copies.</p>
+<hr />
+<h3 id="10-depthwise-conv-inline-vs-eigen-diagonal">10. Depthwise Conv: Inline vs Eigen Diagonal</h3>
+<p>Some WaveNet variants use depthwise (channel-wise) 1x1 convolutions, where each channel is scaled independently -- equivalent to multiplying each row of the activation matrix by a scalar weight. Eigen expresses this as <code>weight.asDiagonal() * input</code>, which constructs a diagonal matrix view and dispatches to a general matrix multiply. The inline version skips the abstraction and directly multiplies each element by the corresponding channel weight.</p>
+<h4 id="desktop-4">Desktop</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen <code>asDiagonal()</code></th><th style="text-align: right">Inline element-wise</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">2</td><td style="text-align: right">48</td><td style="text-align: right">116.0 ns</td><td style="text-align: right">55.1 ns</td><td style="text-align: right"><strong>2.11x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">124.3 ns</td><td style="text-align: right">36.7 ns</td><td style="text-align: right"><strong>3.38x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">182.2 ns</td><td style="text-align: right">87.7 ns</td><td style="text-align: right"><strong>2.08x</strong></td></tr>
+<tr><td style="text-align: right">2</td><td style="text-align: right">2048</td><td style="text-align: right">3.7 us</td><td style="text-align: right">1.3 us</td><td style="text-align: right"><strong>2.89x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">2048</td><td style="text-align: right">2.7 us</td><td style="text-align: right">607.0 ns</td><td style="text-align: right"><strong>4.49x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">2048</td><td style="text-align: right">4.1 us</td><td style="text-align: right">2.2 us</td><td style="text-align: right"><strong>1.83x</strong></td></tr>
+</tbody></table>
+<h4 id="daisy-48-frames-4">Daisy (48 frames)</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen <code>asDiagonal()</code></th><th style="text-align: right">Inline element-wise</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">4681 cyc (9.8 us)</td><td style="text-align: right">3175 cyc (6.6 us)</td><td style="text-align: right"><strong>1.47x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">7356 cyc (15.3 us)</td><td style="text-align: right">7478 cyc (15.6 us)</td><td style="text-align: right">0.98x</td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> Inline element-wise depthwise conv is 1.8--4.5x faster than Eigen's <code>asDiagonal()</code> multiply across all tested sizes.</p>
+<p><strong>Daisy:</strong> Inline wins at 4 channels (1.47x) but ties at 8 channels. The 8-channel case may be hitting register pressure limits where Eigen's code generation produces equivalent scalar code.</p>
+<hr />
+<h3 id="11-film-layer-inline-vs-eigen-array-expressions">11. FiLM Layer: Inline vs Eigen Array Expressions</h3>
+<p>Feature-wise Linear Modulation (FiLM) applies a learned per-channel affine transform -- <code>output = scale * input + shift</code> -- to condition one network's activations on another's predictions. In WaveNet, FiLM layers modulate hidden activations using conditioning signals. Eigen expresses this with <code>.array()</code> broadcasting; the inline version uses a nested loop over channels and frames. "Scale only" omits the shift term, reducing the operation to a per-channel multiply.</p>
+<h4 id="desktop-scale-shift">Desktop -- Scale + Shift</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen <code>.array()</code></th><th style="text-align: right">Inline loop</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">192.9 ns</td><td style="text-align: right">122.8 ns</td><td style="text-align: right"><strong>1.57x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">247.9 ns</td><td style="text-align: right">213.0 ns</td><td style="text-align: right"><strong>1.16x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">2048</td><td style="text-align: right">3.6 us</td><td style="text-align: right">2.1 us</td><td style="text-align: right"><strong>1.68x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">2048</td><td style="text-align: right">3.8 us</td><td style="text-align: right">10.3 us</td><td style="text-align: right">0.36x</td></tr>
+</tbody></table>
+<h4 id="desktop-scale-only">Desktop -- Scale Only</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen <code>.array()</code></th><th style="text-align: right">Inline loop</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">142.1 ns</td><td style="text-align: right">70.1 ns</td><td style="text-align: right"><strong>2.03x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">152.8 ns</td><td style="text-align: right">65.9 ns</td><td style="text-align: right"><strong>2.32x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">2048</td><td style="text-align: right">2.5 us</td><td style="text-align: right">1.4 us</td><td style="text-align: right"><strong>1.84x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">2048</td><td style="text-align: right">3.1 us</td><td style="text-align: right">1.9 us</td><td style="text-align: right"><strong>1.68x</strong></td></tr>
+</tbody></table>
+<h4 id="daisy-48-frames-5">Daisy (48 frames)</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Eigen <code>.array()</code></th><th style="text-align: right">Inline loop</th><th style="text-align: right">Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">2725 cyc (5.7 us)</td><td style="text-align: right">2449 cyc (5.1 us)</td><td style="text-align: right"><strong>1.11x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">4837 cyc (10.1 us)</td><td style="text-align: right">4464 cyc (9.3 us)</td><td style="text-align: right"><strong>1.08x</strong></td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> Inline FiLM is 1.2--2.3x faster in most cases. Scale-only is uniformly faster. The 8-channel x 2048-frame scale+shift case shows a regression (0.36x), likely a cache/vectorization edge case.</p>
+<p><strong>Daisy:</strong> Inline FiLM is 1.08--1.11x faster, a modest but consistent win across both channel counts.</p>
+<hr />
+<h3 id="12-ring-buffer-write-eigen-block-vs-nested-loop">12. Ring Buffer Write: Eigen Block vs Nested Loop</h3>
+<p>WaveNet uses dilated causal convolutions, which require access to past input frames. A ring buffer stores these frames in a fixed-size circular matrix, and each new block of frames must be written at the current write position. This is a contiguous multi-channel write into the middle of a larger matrix. Eigen's <code>.middleCols()</code> compiles to an optimized block copy; the nested-loop version writes element-by-element with explicit index arithmetic.</p>
+<h4 id="desktop-5">Desktop</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Nested loop</th><th style="text-align: right">Eigen <code>middleCols()</code></th><th style="text-align: right">Eigen Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">2</td><td style="text-align: right">48</td><td style="text-align: right">57.1 ns</td><td style="text-align: right">22.4 ns</td><td style="text-align: right"><strong>2.56x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">44.2 ns</td><td style="text-align: right">24.0 ns</td><td style="text-align: right"><strong>1.84x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">51.5 ns</td><td style="text-align: right">48.7 ns</td><td style="text-align: right">1.06x</td></tr>
+<tr><td style="text-align: right">2</td><td style="text-align: right">2048</td><td style="text-align: right">1.7 us</td><td style="text-align: right">399.6 ns</td><td style="text-align: right"><strong>4.25x</strong></td></tr>
+<tr><td style="text-align: right">4</td><td style="text-align: right">2048</td><td style="text-align: right">760.1 ns</td><td style="text-align: right">660.6 ns</td><td style="text-align: right"><strong>1.15x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">2048</td><td style="text-align: right">954.9 ns</td><td style="text-align: right">1.1 us</td><td style="text-align: right">0.87x</td></tr>
+</tbody></table>
+<h4 id="daisy-48-frames-6">Daisy (48 frames)</h4>
+<table><thead><tr><th style="text-align: right">Channels</th><th style="text-align: right">Frames</th><th style="text-align: right">Nested loop</th><th style="text-align: right">Eigen <code>middleCols()</code></th><th style="text-align: right">Eigen Speedup</th></tr></thead><tbody>
+<tr><td style="text-align: right">4</td><td style="text-align: right">48</td><td style="text-align: right">3690 cyc (7.7 us)</td><td style="text-align: right">374 cyc (0.78 us)</td><td style="text-align: right"><strong>9.86x</strong></td></tr>
+<tr><td style="text-align: right">8</td><td style="text-align: right">48</td><td style="text-align: right">6713 cyc (14.0 us)</td><td style="text-align: right">715 cyc (1.5 us)</td><td style="text-align: right"><strong>9.39x</strong></td></tr>
+</tbody></table>
+<p><strong>Desktop:</strong> Eigen's block assignment wins by up to 4.25x for small channel counts. At 8 channels and large frame counts, the nested loop catches up. Eigen compiles <code>.middleCols() = ...</code> to vectorized contiguous writes that scalar nested loops can't match.</p>
+<p><strong>Daisy:</strong> Eigen is 9.4--9.9x faster -- an even larger win than desktop. The scalar nested loop generates extremely poor code on ARM, while Eigen compiles to an optimized contiguous copy. This is the strongest argument for keeping Eigen in the codebase.</p>
+<hr />
+<h3 id="summary-daisy-vs-desktop">Summary: Daisy vs Desktop</h3>
+<table><thead><tr><th style="text-align: left">Optimization</th><th style="text-align: center">Desktop (Apple Silicon)</th><th style="text-align: center">Daisy (Cortex-M7)</th><th style="text-align: left">Notes</th></tr></thead><tbody>
+<tr><td style="text-align: left">Inline generic GEMM vs Eigen</td><td style="text-align: center">0.14--0.38x (Eigen wins)</td><td style="text-align: center"><strong>1.04--1.47x</strong></td><td style="text-align: left">Eigen malloc kills ARM perf</td></tr>
+<tr><td style="text-align: left">Unrolled GEMM vs Eigen</td><td style="text-align: center"><strong>2.04--3.06x</strong></td><td style="text-align: center"><strong>3.10x</strong></td><td style="text-align: left">Wins on both platforms</td></tr>
+<tr><td style="text-align: left">DTCM weight placement</td><td style="text-align: center">N/A</td><td style="text-align: center">1.00x</td><td style="text-align: left">No benefit in isolation</td></tr>
+<tr><td style="text-align: left"><code>__restrict__</code></td><td style="text-align: center">1.00x</td><td style="text-align: center">1.00x</td><td style="text-align: left">No effect on either</td></tr>
+<tr><td style="text-align: left"><code>memcpy</code> vs Eigen block copy</td><td style="text-align: center"><strong>1.14--2.15x</strong> (memcpy wins)</td><td style="text-align: center">0.22--0.23x (Eigen wins)</td><td style="text-align: left">Newlib memcpy is slow</td></tr>
+<tr><td style="text-align: left">Element-wise add</td><td style="text-align: center"><strong>1.04--1.06x</strong></td><td style="text-align: center"><strong>1.08x</strong></td><td style="text-align: left">Small consistent win</td></tr>
+<tr><td style="text-align: left">Bias broadcast</td><td style="text-align: center"><strong>1.05--1.14x</strong></td><td style="text-align: center">0.95--0.98x (Eigen wins)</td><td style="text-align: left">Platform-dependent</td></tr>
+<tr><td style="text-align: left">Hardswish branchless</td><td style="text-align: center"><strong>3.06--3.38x</strong></td><td style="text-align: center"><strong>1.20--1.21x</strong></td><td style="text-align: left">Less impact without SIMD</td></tr>
+<tr><td style="text-align: left">ReLU unrolling</td><td style="text-align: center"><strong>1.19x</strong></td><td style="text-align: center"><strong>1.09x</strong></td><td style="text-align: left">Modest on both</td></tr>
+<tr><td style="text-align: left">LUT SiLU vs computed</td><td style="text-align: center"><strong>1.87x</strong></td><td style="text-align: center"><strong>2.81x</strong></td><td style="text-align: left">Bigger win on ARM (expf costlier)</td></tr>
+<tr><td style="text-align: left">Depthwise inline</td><td style="text-align: center"><strong>2.08--3.38x</strong></td><td style="text-align: center"><strong>1.47x</strong> (4ch only)</td><td style="text-align: left">8ch ties on ARM</td></tr>
+<tr><td style="text-align: left">FiLM inline</td><td style="text-align: center"><strong>1.16--1.57x</strong></td><td style="text-align: center"><strong>1.08--1.11x</strong></td><td style="text-align: left">Consistent small win</td></tr>
+<tr><td style="text-align: left">Ring buffer Eigen</td><td style="text-align: center"><strong>1.84--4.25x</strong></td><td style="text-align: center"><strong>9.39--9.86x</strong></td><td style="text-align: left">Eigen's biggest win, even larger on ARM</td></tr>
+</tbody></table>
+<h2 id="json-when-processing-text-becomes-a-problem">JSON - when processing text becomes a problem</h2>
+<p>NeuralAmpModelerCore uses nlohmann::json to parse .nam files, but it requires a lot of memory to parse a model and memory is not exactly something we have plenty of... E.g. an A1 NAM  model stored as a JSON file takes almost 400KB of memory. Remember when we said the Cortex M7 has between 1-2MB of RAM? Yeah, that is going to be a problem.</p>
+<p>JSON is cool and very accessible for users, as you can just open it in a text file or parse it without any special dependencies in most programming languages. And parsing JSON is definitely not an issue on desktop (your browser does it thousands of times every day without breaking a sweat)... so we did not want to replace the JSON format.</p>
+<p>Our approach was to refactor the factory methods in NeuralAmpModelerCore so they expect some sort of model configuration object instead of a JSON object, and offload parsing either JSON or another file-based representation of models to a parser. This way, both JSON and other formats can use the same "entry point" to build a model from a file, they would just use different parsers.</p>
+<p>We then came up with the namb format, a compact binary format for models to be used instead of the regular nam format in embedded devices. This format is meant to be used as an exchange format between a controller application (say, an app to load models that runs on your phone) and the embedded device. The app converts the nam format that is retrieved from the T3K website into a compact format that is more suited to your pedal, then transmits it over Bluetooth or an USB cable. There is no model conversion here: think of namb just as a more "compressed" format. Learn more at <a rel="external" href="https://github.com/tone-3000/nam-binary-loader">this repo</a>.</p>
+<h2 id="contributions">Contributions</h2>
+<p>All of the optimizations that were helpful for us to run NeuralAmpModelerCore on the Daisy were <a rel="external" href="https://github.com/sdatkinson/NeuralAmpModelerCore/commit/a0c93c0c3934abec0bca80d2e9e592ac86217db4">merged</a>, meaning these are all readily available for anyone who wants to try something similar. They currently require compiling with <code>CXXFLAGS+=USE_NAM_INLINE_GEMM</code>.</p>
+<p>In order to enable using our binary loader, model construction in core was decoupled from JSON parsing, which was also <a rel="external" href="https://github.com/sdatkinson/NeuralAmpModelerCore/commit/20a04fcf466dc4233730412b120e5bbad72402c3">merged</a>. The code for nam-binary-loader is available as a separate library and tool in <a rel="external" href="https://github.com/tone-3000/nam-binary-loader">this repo</a>.</p>
+<p>Finally, we are publishing example code for the Daisy Seed board, to be used as a blueprint for porting NeuralAmpModelerCore to embedded targets. This was our target during optimization: we worked until we were able to run an A1 nano ReLU model in real time on the Daisy Seed. The code and instructions for how to build and run it on the Daisy are in <a rel="external" href="https://github.com/tone-3000/nam-pedal">their own repo</a>.</p>
+<p>We hope this helps anyone who is interested in experimenting with supporting NAM in their hardware with trying things out.</p>
+
+</main>
+
+    <div class="dark-mode-buttons">
+        <button class="dark-mode-button" id="dark-mode-on"><img src="https://jfsantos.dev/dark_mode.svg" width="24" height="24" alt="Dark mode" aria-label="dark mode toggle" title="Dark mode"></button>
+        <button class="dark-mode-button" id="dark-mode-off"><img src="https://jfsantos.dev/light_mode.svg" width="24" height="24" alt="Light mode" aria-label="light mode toggle" title="Light mode"></button>
+    </div>
+    <script>
+        const cls = document.querySelector("html").classList;
+        const sessionTheme = sessionStorage.getItem("theme");
+
+        function setDark() {
+            cls.add("dark-mode");
+            cls.remove("light-mode");
+            sessionStorage.setItem("theme", "dark");
+        }
+        function setLight() {
+            cls.add("light-mode");
+            cls.remove("dark-mode");
+            sessionStorage.setItem("theme", "light");
+        }
+
+        if (sessionTheme === "dark") {
+            setDark();
+        } else if (sessionTheme === "light") {
+            setLight();
+        } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            setDark();
+        }
+
+        document.getElementById("dark-mode-on").addEventListener("click", function(e) {
+            setDark();
+        });
+        document.getElementById("dark-mode-off").addEventListener("click", function(e) {
+            setLight();
+        });
+    </script>
+    <noscript>
+        <style>
+            .dark-mode-buttons {
+                display: none;
+            }
+        </style>
+    </noscript>
+</body>
+</html>
