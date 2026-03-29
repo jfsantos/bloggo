@@ -219,6 +219,22 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
                     font-family: inherit; padding: 0 4px; }
 #kb-overlay-close:hover { color: #f66; }
 #kb-overlay-body { padding: 8px 10px; }
+
+/* About overlay */
+#about { position: fixed; z-index: 1000; display: none; background: #12122aee;
+         border: 1px solid #00d4ff44; border-radius: 6px; padding: 0; min-width: 300px;
+         box-shadow: 0 4px 20px #000a; backdrop-filter: blur(4px); font-size: 11px; }
+#about.visible { display: block; }
+#about-header { display: flex; justify-content: space-between; align-items: center; padding: 5px 10px;
+                cursor: move; background: #1a1a3a; border-radius: 6px 6px 0 0; border-bottom: 1px solid #333;
+                user-select: none; }
+#about-header span { color: #00d4ff; font-weight: bold; font-size: 11px; }
+#about-close { background: none; border: none; color: #666; cursor: pointer; font-size: 14px;
+               font-family: inherit; padding: 0 4px; }
+#about-close:hover { color: #f66; }
+#about-body { padding: 12px 14px; color: #ccc; line-height: 1.6; }
+#about-body a { color: #00d4ff; text-decoration: none; }
+#about-body a:hover { text-decoration: underline; }
 .kb-section { margin-bottom: 8px; }
 .kb-section-title { color: #00d4ff; font-size: 9px; text-transform: uppercase; letter-spacing: 1px;
                     margin-bottom: 4px; }
@@ -243,6 +259,9 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
   <div class="menu-item" id="menu-file">
     <button onclick="menuToggle('menu-file')">File</button>
     <div class="menu-dropdown">
+      <button onclick="openProject(); menuClose()">Open Project...</button>
+      <button onclick="saveProject(); menuClose()">Save Project</button>
+      <div class="menu-sep"></div>
       <button onclick="importSEQ(); menuClose()">Import SEQ...</button>
       <button onclick="importTonForTracker(); menuClose()">Import TON...</button>
       <div class="menu-sep"></div>
@@ -285,6 +304,7 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
     <button onclick="menuToggle('menu-help')">Help</button>
     <div class="menu-dropdown">
       <button onclick="toggleKbOverlay(); menuClose()">Keyboard Shortcuts <span class="menu-kbd">F1</span></button>
+      <button onclick="toggleAbout(); menuClose()">About...</button>
     </div>
   </div>
 </div>
@@ -1311,10 +1331,11 @@ function parseMIDI(buf) {
  * });
  * // mid is a Uint8Array containing a valid .mid file
  */
-function buildMIDI({ patterns, song, bpm, stepsPerBeat, numChannels }) {
+function buildMIDI({ patterns, song, bpm, stepsPerBeat, numChannels, mutedChannels }) {
     const resolution = 480;
     const ticksPerStep = resolution / stepsPerBeat;
     const mspb = Math.round(60000000 / bpm);
+    const muted = mutedChannels || [];
 
     const events = [];
     let stepOffset = 0;
@@ -1323,6 +1344,7 @@ function buildMIDI({ patterns, song, bpm, stepsPerBeat, numChannels }) {
     for (const patIdx of song) {
         const pat = patterns[patIdx];
         for (let ch = 0; ch < numChannels; ch++) {
+            if (muted.indexOf(ch) >= 0) continue;
             if (!(ch in channelInst)) channelInst[ch] = pat.channels[ch].defaultInst;
         }
     }
@@ -1334,6 +1356,7 @@ function buildMIDI({ patterns, song, bpm, stepsPerBeat, numChannels }) {
         const pat = patterns[patIdx];
         for (let row = 0; row < pat.length; row++) {
             for (let ch = 0; ch < numChannels; ch++) {
+                if (muted.indexOf(ch) >= 0) continue;
                 const cell = pat.channels[ch].rows[row];
                 if (cell.note !== null && cell.note >= 0) {
                     const absTick = Math.round((stepOffset + row) * ticksPerStep);
@@ -1632,10 +1655,11 @@ function parseSEQ(buf) {
  * });
  * // seq is a Uint8Array containing a valid .seq file
  */
-function buildSEQ({ patterns, song, bpm, stepsPerBeat, numChannels }) {
+function buildSEQ({ patterns, song, bpm, stepsPerBeat, numChannels, mutedChannels }) {
     const resolution = 480;
     const ticksPerStep = resolution / stepsPerBeat;
     const mspb = Math.round(60000000 / bpm);
+    const muted = mutedChannels || [];
 
     const events = [];
     let stepOffset = 0;
@@ -1644,6 +1668,7 @@ function buildSEQ({ patterns, song, bpm, stepsPerBeat, numChannels }) {
     for (const patIdx of song) {
         const pat = patterns[patIdx];
         for (let ch = 0; ch < numChannels; ch++) {
+            if (muted.indexOf(ch) >= 0) continue;
             if (!(ch in channelInst)) channelInst[ch] = pat.channels[ch].defaultInst;
         }
     }
@@ -1662,6 +1687,7 @@ function buildSEQ({ patterns, song, bpm, stepsPerBeat, numChannels }) {
         const pat = patterns[patIdx];
         for (let row = 0; row < pat.length; row++) {
             for (let ch = 0; ch < numChannels; ch++) {
+                if (muted.indexOf(ch) >= 0) continue;
                 const cell = pat.channels[ch].rows[row];
                 if (cell.note !== null && cell.note >= 0) {
                     const absTick = Math.round((stepOffset + row) * ticksPerStep);
@@ -2048,6 +2074,24 @@ var TrackerState = (function () {
         for (var i = 0; i < NUM_CHANNELS; i++) channelState[i] = 'on';
     }
 
+    /**
+     * Get a copy of the full channel state array.
+     * @returns {string[]} Array of 'on', 'muted', or 'solo' per channel
+     */
+    function getChannelStates() {
+        return channelState.slice();
+    }
+
+    /**
+     * Restore channel state from a saved array.
+     * @param {string[]} states - Array of 'on', 'muted', or 'solo' per channel
+     */
+    function setChannelStates(states) {
+        for (var i = 0; i < NUM_CHANNELS; i++) {
+            channelState[i] = (states && states[i]) || 'on';
+        }
+    }
+
     // ── Public API ──
 
     var api = {
@@ -2069,6 +2113,8 @@ var TrackerState = (function () {
         toggleMute: toggleMute,
         toggleSolo: toggleSolo,
         getChannelState: getChannelState,
+        getChannelStates: getChannelStates,
+        setChannelStates: setChannelStates,
         resetChannelState: resetChannelState,
     };
 
@@ -3323,6 +3369,8 @@ var TrackerUI = (function() {
         w.dupInstrument = dupInstrument;
         w.delInstrument = delInstrument;
         w.onTonSelect = onTonSelect;
+        w.saveProject = saveProject;
+        w.openProject = openProject;
         w.toggleMute = toggleMute;
         w.toggleSolo = toggleSolo;
         w.setPatternLength = setPatternLength;
@@ -4106,9 +4154,93 @@ var TrackerUI = (function() {
         showStatus('Exported TON (' + state.instruments.length + ' instruments)');
     }
 
-    /** @description Export song as a Saturn SEQ file and trigger browser download. */
+    // ═══════════════════════════════════════════════════════════════
+    // PROJECT SAVE / OPEN (.beb)
+    // ═══════════════════════════════════════════════════════════════
+
+    /** @description Save the full tracker state as a .beb JSON project file. */
+    function saveProject() {
+        var project = {
+            version: 1,
+            bpm: state.bpm,
+            stepsPerBeat: state.stepsPerBeat,
+            patternLength: state.patternLength,
+            instruments: state.instruments,
+            patterns: state.patterns,
+            song: state.song,
+            channelStates: TrackerState.getChannelStates(),
+        };
+        var json = JSON.stringify(project);
+        var blob = new Blob([json], { type: 'application/json' });
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'project.beb';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showStatus('Project saved (' + json.length + ' bytes)');
+    }
+
+    /** @description Open a .beb project file and restore the full tracker state. */
+    function openProject() {
+        var input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.beb';
+        input.style.display = 'none';
+        document.body.appendChild(input);
+        input.onchange = function(e) {
+            var file = e.target.files[0];
+            document.body.removeChild(input);
+            if (!file) return;
+            var reader = new FileReader();
+            reader.onload = function(ev) {
+                try {
+                    var project = JSON.parse(ev.target.result);
+                    if (!project.version || !project.patterns || !project.instruments) {
+                        showStatus('Invalid .beb file');
+                        return;
+                    }
+                    if (playback.playing) playback.stop();
+                    state.bpm = project.bpm || 120;
+                    state.stepsPerBeat = project.stepsPerBeat || 4;
+                    state.patternLength = project.patternLength || 32;
+                    state.instruments = project.instruments;
+                    state.patterns = project.patterns;
+                    state.song = project.song || [0];
+                    state.cursor = { row: 0, ch: 0, col: 0 };
+                    currentSongSlot = 0;
+                    selectedInst = 0;
+                    selectedOp = 0;
+                    if (project.channelStates) {
+                        TrackerState.setChannelStates(project.channelStates);
+                    } else {
+                        TrackerState.resetChannelState();
+                    }
+                    document.getElementById('bpm').value = state.bpm;
+                    document.getElementById('pat-len').value = state.patternLength;
+                    renderAll();
+                    notifySelectionChange();
+                    showStatus('Opened: ' + file.name);
+                } catch (err) {
+                    showStatus('Error loading project: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+        };
+        input.click();
+    }
+
+    /** @description Get list of channel indices that are currently inaudible (muted or not soloed). */
+    function getMutedChannels() {
+        var muted = [];
+        for (var ch = 0; ch < NUM_CHANNELS; ch++) {
+            if (!TrackerState.isChannelAudible(ch)) muted.push(ch);
+        }
+        return muted;
+    }
+
+    /** @description Export song as a Saturn SEQ file and trigger browser download. Muted channels are excluded. */
     function exportSEQ() {
-        const seqData = buildSEQ({ patterns: state.patterns, song: state.song, bpm: state.bpm, stepsPerBeat: state.stepsPerBeat, numChannels: NUM_CHANNELS });
+        const seqData = buildSEQ({ patterns: state.patterns, song: state.song, bpm: state.bpm, stepsPerBeat: state.stepsPerBeat, numChannels: NUM_CHANNELS, mutedChannels: getMutedChannels() });
         if (!seqData) return;
         const blob = new Blob([seqData], { type: 'application/octet-stream' });
         const a = document.createElement('a');
@@ -4119,9 +4251,9 @@ var TrackerUI = (function() {
         showStatus('Exported SEQ (' + seqData.length + ' bytes)');
     }
 
-    /** @description Export song as a Standard MIDI file and trigger browser download. */
+    /** @description Export song as a Standard MIDI file and trigger browser download. Muted channels are excluded. */
     function exportMIDI() {
-        const midiData = buildMIDI({ patterns: state.patterns, song: state.song, bpm: state.bpm, stepsPerBeat: state.stepsPerBeat, numChannels: NUM_CHANNELS });
+        const midiData = buildMIDI({ patterns: state.patterns, song: state.song, bpm: state.bpm, stepsPerBeat: state.stepsPerBeat, numChannels: NUM_CHANNELS, mutedChannels: getMutedChannels() });
         if (!midiData) return;
         const blob = new Blob([midiData], { type: 'audio/midi' });
         const a = document.createElement('a');
@@ -5766,6 +5898,21 @@ SCSPPanels.init(state, SCSPEngine, TrackerUI);
   </div>
 </div>
 
+<!-- About overlay -->
+<div id="about">
+  <div id="about-header">
+    <span>About Bebhionn</span>
+    <button id="about-close" onclick="toggleAbout()">&times;</button>
+  </div>
+  <div id="about-body">
+    <strong>Bebhionn</strong> is a browser-based vertical tracker for composing
+    music with the Sega Saturn's SCSP (YMF292-F) sound chip.<br><br>
+    It uses a hardware-accurate WASM emulator &mdash; what you hear is what the
+    Saturn plays. Exports SEQ + TON files directly.<br><br>
+    <a href="https://github.com/jfsantos/bebhionn" target="_blank" rel="noopener">github.com/jfsantos/bebhionn</a>
+  </div>
+</div>
+
 <script>
 // Menu bar: toggle dropdowns, close on outside click
 function menuToggle(id) {
@@ -5802,6 +5949,17 @@ function toggleKbOverlay() {
         el.dataset.positioned = '1';
     }
 }
+// Keyboard overlay: toggle, drag, F1 shortcut
+function toggleAbout() {
+    var el = document.getElementById('about');
+    el.classList.toggle('visible');
+    if (el.classList.contains('visible') && !el.dataset.positioned) {
+        el.style.right = '280px';
+        el.style.top = '60px';
+        el.dataset.positioned = '1';
+    }
+}
+
 
 (function() {
     var overlay = document.getElementById('kb-overlay');
@@ -5826,6 +5984,27 @@ function toggleKbOverlay() {
     document.addEventListener('keydown', function(e) {
         if (e.key === 'F1') { e.preventDefault(); toggleKbOverlay(); }
     });
+})();
+
+// About overlay: drag
+(function() {
+    var overlay = document.getElementById('about');
+    var header = document.getElementById('about-header');
+    var dragging = false, ox = 0, oy = 0;
+
+    header.addEventListener('mousedown', function(e) {
+        dragging = true;
+        ox = e.clientX - overlay.offsetLeft;
+        oy = e.clientY - overlay.offsetTop;
+        e.preventDefault();
+    });
+    document.addEventListener('mousemove', function(e) {
+        if (!dragging) return;
+        overlay.style.left = (e.clientX - ox) + 'px';
+        overlay.style.top = (e.clientY - oy) + 'px';
+        overlay.style.right = 'auto';
+    });
+    document.addEventListener('mouseup', function() { dragging = false; });
 })();
 </script>
 </body>
