@@ -51,7 +51,9 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 #slot-meter.full { color: #f66; }
 
 /* Channel headers */
-#ch-headers { display: flex; padding: 0 12px 0 42px; background: #14142e; border-bottom: 1px solid #333; flex-shrink: 0; }
+#ch-headers { display: flex; padding: 0; background: #14142e; border-bottom: 1px solid #333;
+              flex-shrink: 0; position: sticky; top: 0; z-index: 2; }
+.ch-hdr-spacer { width: 30px; min-width: 30px; flex-shrink: 0; border-right: 1px solid #222; background: #0d0d20; }
 .ch-hdr { flex: 1; min-width: 120px; padding: 4px 6px; font-size: 10px; color: #888;
            display: flex; align-items: center; gap: 4px; border-right: 1px solid #222; }
 .ch-hdr select { background: #1a1a2e; color: #aaa; border: 1px solid #333; padding: 1px 2px;
@@ -66,8 +68,9 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 .cell.ch-muted { opacity: 0.3; }
 
 /* Pattern grid */
-#grid-container { flex: 1; overflow-y: auto; overflow-x: auto; }
-#grid { display: table; width: 100%; border-collapse: collapse; }
+#grid-scroll { flex: 1; overflow: auto; display: flex; flex-direction: column; }
+#grid-inner { min-width: max-content; display: flex; flex-direction: column; }
+#grid { display: flex; flex-direction: column; min-width: max-content; }
 .row { display: flex; border-bottom: 1px solid #111; }
 .row.beat { border-top: 2px solid #2a2a4e; }
 .row.playing { background: #1a2a1a; }
@@ -368,9 +371,11 @@ body { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #0a0a1a;
 <div id="main-area">
   <!-- Grid wrapper -->
   <div id="grid-wrapper">
-    <div id="ch-headers"></div>
-    <div id="grid-container">
-      <div id="grid"></div>
+    <div id="grid-scroll">
+      <div id="grid-inner">
+        <div id="ch-headers"></div>
+        <div id="grid"></div>
+      </div>
     </div>
   </div>
 
@@ -2685,6 +2690,25 @@ var TrackerState = (function () {
         }
     }
 
+    // ── Pattern compatibility ──
+
+    /**
+     * Pad an existing pattern's channels up to NUM_CHANNELS, filling new channels
+     * with empty rows. Needed when loading projects saved before NUM_CHANNELS grew.
+     * Mutates and returns the pattern.
+     * @param {Object} pat - Pattern with {length, channels[]}
+     * @param {number} numInstruments - Used to clamp defaultInst on new channels.
+     */
+    function padPatternChannels(pat, numInstruments) {
+        if (!pat || !pat.channels) return pat;
+        for (var ch = pat.channels.length; ch < NUM_CHANNELS; ch++) {
+            var rows = [];
+            for (var r = 0; r < pat.length; r++) rows.push({ note: null, inst: null, vol: null });
+            pat.channels.push({ defaultInst: Math.min(ch, (numInstruments || 1) - 1), rows: rows });
+        }
+        return pat;
+    }
+
     // ── Hardware slot-budget accounting ──
 
     /**
@@ -2732,6 +2756,7 @@ var TrackerState = (function () {
         NUM_CHANNELS: NUM_CHANNELS,
         MAX_SLOTS: MAX_SLOTS,
         computeSongSlotUsage: computeSongSlotUsage,
+        padPatternChannels: padPatternChannels,
         KEY_NOTE_MAP: KEY_NOTE_MAP,
         create: create,
         createEmptyPattern: createEmptyPattern,
@@ -4409,6 +4434,10 @@ var TrackerUI = (function() {
         const el = document.getElementById('ch-headers');
         el.innerHTML = '';
         const pat = getCurrentPattern();
+        // Spacer matches the grid's row-number gutter so each ch-hdr lines up with its column.
+        const spacer = document.createElement('div');
+        spacer.className = 'ch-hdr-spacer';
+        el.appendChild(spacer);
         for (let ch = 0; ch < NUM_CHANNELS; ch++) {
             const div = document.createElement('div');
             div.className = 'ch-hdr' + (TrackerState.getChannelState(ch) === 'muted' || (!TrackerState.isChannelAudible(ch) && TrackerState.getChannelState(ch) !== 'solo') ? ' muted' : '');
@@ -5275,6 +5304,10 @@ var TrackerUI = (function() {
                     state.patternLength = project.patternLength || 32;
                     state.instruments = project.instruments;
                     state.patterns = project.patterns;
+                    // Older projects may have fewer channels than NUM_CHANNELS — pad.
+                    for (var pi = 0; pi < state.patterns.length; pi++) {
+                        TrackerState.padPatternChannels(state.patterns[pi], state.instruments.length);
+                    }
                     state.song = project.song || [0];
                     state.cursor = { row: 0, ch: 0, col: 0 };
                     currentSongSlot = 0;
@@ -5399,7 +5432,7 @@ var TrackerUI = (function() {
         var bpmEl = document.getElementById('bpm');
         if (bpmEl) bpmEl.value = state.bpm;
 
-        var PL = 32, NC = 8;
+        var PL = 32, NC = TrackerState.NUM_CHANNELS;
 
         function mkPat() {
             var ch = [];
