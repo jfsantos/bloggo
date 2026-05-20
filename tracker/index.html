@@ -730,9 +730,19 @@ const TonIO = (function () {
         if (lea === undefined || lea === null || lea < 0) lea = wave.length;
         const loop = (op.loop_mode !== undefined ? op.loop_mode : 1) !== 0;
 
-        // Base note from freq ratio
+        // Base note: PCM samples with a known source rate need the rate
+        // ratio folded in, since the SCSP plays one stored sample per output
+        // sample at OCT=0/FNS=0 — so to make the recording sound at root_note
+        // the OCT=0 anchor sits at root_note + 12·log2(SCSP_RATE/sample_rate).
+        // Other operators fall back to the freq_ratio convention (ratio=1 →
+        // baseNote=69 = A4).
+        const SCSP_RATE = 44100;
         let baseNote = 69;
-        if (op.freq_ratio && op.freq_ratio > 0) {
+        if (op.sample_rate && op.sample_rate > 0) {
+          const root = (op.root_note != null) ? op.root_note : 69;
+          baseNote = Math.max(0, Math.min(127,
+            Math.round(root + 12 * Math.log2(SCSP_RATE / op.sample_rate))));
+        } else if (op.freq_ratio && op.freq_ratio > 0) {
           const ratioSemitones = Math.round(12 * Math.log2(op.freq_ratio));
           baseNote = Math.max(0, Math.min(127, 69 - ratioSemitones));
         }
@@ -1766,19 +1776,22 @@ var DX7Import = (function() {
 const NOTE_NAMES = ['C-','C#','D-','D#','E-','F-','F#','G-','G#','A-','A#','B-'];
 
 /**
- * Convert a MIDI note number to a display string.
+ * Convert a MIDI note number to a display string using the standard MIDI /
+ * DAW octave convention where MIDI 60 (middle C) is labeled C4. This matches
+ * what every DAW, sample library, SF2/SFZ root key, and WAV smpl chunk uses,
+ * so root-note pickers and pattern labels line up with external tools.
  *
  * @param {number} midi - MIDI note number (0–127)
  * @returns {string} Note name with octave, e.g. `"C-4"`, `"F#5"`. Returns `"???"` if out of range.
  *
  * @example
- * noteName(60)  // "C-5"
- * noteName(69)  // "A-5"
+ * noteName(60)  // "C-4" (middle C)
+ * noteName(69)  // "A-4" (A440)
  * noteName(128) // "???"
  */
 function noteName(midi) {
     if (midi < 0 || midi > 127) return '???';
-    return NOTE_NAMES[midi % 12] + Math.floor(midi / 12);
+    return NOTE_NAMES[midi % 12] + (Math.floor(midi / 12) - 1);
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -3286,7 +3299,7 @@ var SCSPEngine = (function() {
         ]},
         // 4. Acid Bass — self-feedback modulator creates saw-like harmonics; high MDL for grit
         { name: 'Acid Bass', operators: [
-            { freq_ratio:1.0, freq_fixed:0, level:0.9, ar:31, d1r:8,  dl:4, d2r:0, rr:16, mdl:0,  mod_sources:[], feedback:10, is_carrier:false, waveform:0, loop_mode:1, loop_start:0, loop_end:1024 },
+            { freq_ratio:1.0, freq_fixed:0, level:0.9, ar:31, d1r:8,  dl:4, d2r:0, rr:16, mdl:0,  mod_sources:[], feedback:8, is_carrier:false, waveform:0, loop_mode:1, loop_start:0, loop_end:1024 },
             { freq_ratio:1.0, freq_fixed:0, level:0.9, ar:31, d1r:10, dl:6, d2r:2, rr:16, mdl:11, mod_sources:[0],  feedback:0, is_carrier:true, waveform:0, loop_mode:1, loop_start:0, loop_end:1024 },
         ]},
         // 5. Harsh Lead — 3-op stacked chain (mod→mod→carrier); square-wave modulator for extra edge
@@ -3630,8 +3643,31 @@ var SCSPEngine = (function() {
         }
 
         var wavLen = wav.length || WAVE_LEN;
-        var wavBaseFreq = SAMPLE_RATE / wavLen;
-        var wavBaseNote = wavBaseNoteFor(wavLen);
+
+        // Pitch base note: PCM samples and period waveforms anchor differently.
+        //  - PCM sample (sample_rate set, not driving FM): the stored buffer
+        //    is an arbitrary recording, not one period. At OCT=0/FNS=0 the
+        //    SCSP advances one stored sample per output sample (playback rate
+        //    = SAMPLE_RATE). So to make the recording sound at its natural
+        //    pitch when the user plays op.root_note, the OCT=0 anchor note is
+        //    root_note shifted by the rate ratio: an N-fold rate increase is
+        //    +12·log2(N) semitones.
+        //  - Period waveform (built-in sine/saw/etc., or any FM role): the
+        //    buffer is one cycle, so opBaseNote derives from its natural
+        //    period at SAMPLE_RATE.
+        // Either way, wavBaseFreq = 440 * 2^((wavBaseNote-69)/12) gives the
+        // audible Hz at the OCT=0 anchor (this expression equals SAMPLE_RATE/
+        // wavLen for the period case — same formula, different anchor).
+        // freq_ratio applies as a semitone offset on top of either base.
+        var isPcmSample = !usesFM && !isMod && op.sample_rate > 0;
+        var wavBaseNote;
+        if (isPcmSample) {
+            var rootNote = (op.root_note != null) ? op.root_note : 69;
+            wavBaseNote = rootNote + 12 * Math.log2(SAMPLE_RATE / op.sample_rate);
+        } else {
+            wavBaseNote = wavBaseNoteFor(wavLen);
+        }
+        var wavBaseFreq = 440 * Math.pow(2, (wavBaseNote - 69) / 12);
 
         // Pitch (OCT/FNS): two cases.
         //  - freq_ratio mode: opBaseNote = wavBaseNote shifted down by the ratio
@@ -4113,15 +4149,24 @@ var SCSPEngine = (function() {
         cChk.onchange = function() { op.is_carrier = cChk.checked; syncRawRegs(op); _renderInstEditor(container, inst, selectedOp, onChange); };
         cRow.appendChild(cLbl); cRow.appendChild(cChk); container.appendChild(cRow);
 
-        // Test button
+        // Test button. For PCM samples (sample_rate set on the selected op),
+        // play at the op's root_note so the user always hears the recording
+        // unshifted — auditioning the sample, not the transposition. For all
+        // other ops the conventional middle-C test note (MIDI 60 = C4) is
+        // used. The played note is resolved on click so root_note edits don't
+        // need a re-render.
+        function _testNoteFor(o) {
+            return (o.sample_rate > 0 && o.root_note != null) ? o.root_note : 60;
+        }
         var testRow = document.createElement('div'); testRow.style.marginTop = '8px';
         var testBtn = document.createElement('button');
-        testBtn.textContent = 'Test (C-4)';
+        testBtn.textContent = 'Test (' + noteName(_testNoteFor(op)) + ')';
         testBtn.style.cssText = 'background:#2a4a2e;color:#8c8;border:1px solid #4a4;padding:4px 12px;cursor:pointer;border-radius:3px;font-family:inherit;font-size:10px;';
         testBtn.onclick = function() {
             api.init().then(function() {
                 if (playbackRef) api.startAudio(playbackRef);
-                _triggerNote(99, 60, 0, inst);
+                var note = _testNoteFor(inst.operators[selectedOp]);
+                _triggerNote(99, note, 0, inst);
                 setTimeout(function() { voiceAlloc.release(99); }, 500);
             });
         };
@@ -6270,6 +6315,40 @@ var SCSPPanels = (function() {
             drawWaveformPreview();
         };
         el.appendChild(leLbl); el.appendChild(leInp);
+
+        // PCM-sample-only controls: shown when the operator carries a
+        // recording with a known source sample rate. Root note tells
+        // programSlot which MIDI note should play the sample at its natural
+        // pitch; sample rate is the WAV's recorded rate (read-only).
+        //
+        // The note picker uses noteName() so labels match what users enter
+        // in the pattern grid (standard MIDI: MIDI 60 = C4 = middle C).
+        if (op.sample_rate > 0) {
+            var rnLbl = document.createElement('label'); rnLbl.textContent = 'Root:';
+            var rnSel = document.createElement('select');
+            var curRoot = (op.root_note != null) ? op.root_note : 69;
+            for (var n = 0; n < 128; n++) {
+                var o = document.createElement('option');
+                o.value = n;
+                o.textContent = noteName(n);
+                if (n === curRoot) o.selected = true;
+                rnSel.appendChild(o);
+            }
+            rnSel.onchange = function() {
+                op.root_note = parseInt(rnSel.value);
+                engine.syncRawRegs(op);
+                engine.liveUpdatePreview(state.instruments, selectedInst, selectedOp);
+                ui.renderInstEditor();
+            };
+            el.appendChild(rnLbl); el.appendChild(rnSel);
+
+            var srLbl = document.createElement('label'); srLbl.textContent = 'Rate:';
+            var srSpan = document.createElement('span');
+            srSpan.textContent = op.sample_rate + ' Hz';
+            srSpan.style.fontSize = '10px';
+            srSpan.style.color = '#aaa';
+            el.appendChild(srLbl); el.appendChild(srSpan);
+        }
     }
 
     // --- Routing graph ---
@@ -6382,7 +6461,7 @@ var SCSPPanels = (function() {
             var o = dOff + i * bps * fmt.ch;
             out[i] = fmt.bits === 16 ? v.getInt16(o, true) / 32768 : fmt.bits === 8 ? (v.getUint8(o) - 128) / 128 : 0;
         }
-        return { samples: out };
+        return { samples: out, sampleRate: fmt.sr, bits: fmt.bits };
     }
 
     function resampleTo(input, targetLen) {
@@ -6410,9 +6489,24 @@ var SCSPPanels = (function() {
                         var inst = state.instruments[selectedInst];
                         var op = inst.operators[selectedOp];
 
+                        // PCM loads keep their original length and sample
+                        // rate so pitch can be reconstructed correctly at
+                        // playback time (see programSlot's isPcmSample path).
+                        // The 1024-sample resample is reserved for the
+                        // operator's role as an FM cycle, which programSlot
+                        // handles by substituting the default sine when an
+                        // operator with a non-1024 wave is used as modulator
+                        // or FM carrier.
+                        //
+                        // SCSP LSA/LEA registers are 16-bit, so loops can't
+                        // address past sample 65535. Truncate to keep loop
+                        // points consistent with the stored data.
                         var samples = result.samples;
-                        if (samples.length !== engine.WAVE_LEN) {
-                            samples = resampleTo(samples, engine.WAVE_LEN);
+                        var MAX_PCM = 65535;
+                        var truncated = false;
+                        if (samples.length > MAX_PCM) {
+                            samples = samples.slice(0, MAX_PCM);
+                            truncated = true;
                         }
 
                         var wid = engine.addWaveform(samples, 0, samples.length, 1);
@@ -6420,10 +6514,15 @@ var SCSPPanels = (function() {
                         op.loop_start = 0;
                         op.loop_end = samples.length;
                         op.loop_mode = 1;
+                        op.sample_rate = result.sampleRate;
+                        if (op.root_note == null) op.root_note = 69;
                         engine.customWaves[selectedInst + '_' + selectedOp] = samples;
                         engine.syncRawRegs(op);
                         refreshInstDetail();
                         ui.renderInstEditor();
+                        if (truncated) {
+                            alert('WAV longer than 65535 samples; truncated to fit SCSP loop registers.');
+                        }
                     });
                 } catch (err) { alert('WAV error: ' + err.message); }
             };
