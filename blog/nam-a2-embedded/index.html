@@ -3,19 +3,43 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="">
+    <meta name="description" content="How we got Neural Amp Modeler running in real time on an ARM Cortex-M7 (Electrosmith Daisy Seed): profiling, replacing Eigen in the hot paths, and a compact binary model format.">
     <title>João Felipe Santos | Bringing NAM A2 to Embedded Hardware</title>
     
-    <link rel="stylesheet" href="https://jfsantos.dev/style.css?h=c59bf21e289e8d31d2b7">
+
+    <link rel="stylesheet" href="https://jfsantos.dev/style.css?h=72bd07992bac562ea3f6">
+    
+
     
     
+    
+    
+
+    <meta property="og:site_name" content="João Felipe Santos">
+    <meta property="og:title" content="Bringing NAM A2 to Embedded Hardware">
+    <meta property="og:description" content="How we got Neural Amp Modeler running in real time on an ARM Cortex-M7 (Electrosmith Daisy Seed): profiling, replacing Eigen in the hot paths, and a compact binary model format.">
+    <meta property="og:url" content="https://jfsantos.dev/blog/nam-a2-embedded/">
+    <meta property="og:type" content="article">
+    <meta property="og:image" content="https://jfsantos.dev/about/joao.png">
+    <meta name="twitter:card" content="summary">
+    <link rel="canonical" href="https://jfsantos.dev/blog/nam-a2-embedded/">
+
+    
+        
+            
+                
+                    
+                        <link rel="alternate" type="application/atom+xml" title="João Felipe Santos - Atom Feed" href="https://jfsantos.dev/atom.xml">
+                    
+                
+            
         
     
 </head>
 <body>
     
 <header class="space">
-    <a href="https:&#x2F;&#x2F;jfsantos.dev">&LeftArrow; Home</a>
+    <a href="https://jfsantos.dev">&LeftArrow; Home</a>
 </header>
 
     
@@ -26,16 +50,14 @@
         11 February, 2026
 
         
-        
-        
 
         
     </p>
     
     <div class="space"></div>
     <p>Note: this post is a partner post to <a rel="external" href="https://www.tone3000.com/blog/running-nam-on-embedded-hardware">a post I wrote for the Tone3000 blog</a>, with a more in-depth discussion of all the optimizations and results we found.</p>
-<p>We all love NAM, and we want to run our favourite captures EVERYWHERE. And that's what we have been trying to achieve with <a rel="external" href="https://www.neuralampmodeler.com/post/architecture-a2">A2</a>, especially <a rel="external" href="https://www.neuralampmodeler.com/post/introducing-slimmable-nam-neural-amp-models-with-adjustable-runtime-computational-cost">Slimmable models</a>. As part of the development of A2, we are working closely with partners to make sure A2 suits their hardware. We also wanted to have a general idea of what running NAM in hardware platforms with more resources looks like, so we decided to get our hands dirty and implement a simple NAM loader for the <a rel="external" href="https://daisy.audio/hardware/Seed/">Electrosmith Daisy Seed</a> board, which has an ARM Cortex M7 that is currently very popular for DSP applications.</p>
-<insert cute picture of the Daisy Seed on the Pod here>
+<p>We all love NAM, and we want to run our favourite captures EVERYWHERE. And that's what we have been trying to achieve with <a rel="external" href="https://www.neuralampmodeler.com/post/architecture-a2">A2</a>, especially <a rel="external" href="https://www.neuralampmodeler.com/post/introducing-slimmable-nam-neural-amp-models-with-adjustable-runtime-computational-cost">Slimmable models</a>. As part of the development of A2, we are working closely with partners to make sure A2 suits their hardware. We also wanted to have a general idea of what running NAM in hardware platforms with far fewer resources looks like, so we decided to get our hands dirty and implement a simple NAM loader for the <a rel="external" href="https://docs.daisy.audio/hardware/Seed3/">Electrosmith Daisy Seed</a> board, which has an ARM Cortex M7 that is currently very popular for DSP applications.</p>
+<!-- TODO: photo of the Daisy Seed on the Pod -->
 <p>The Daisy Seed board has the following specs:</p>
 <ul>
 <li>ARM Cortex M7 running at 480 MHz</li>
@@ -50,7 +72,7 @@
 <p>While the code in NeuralAmpModelerCore has been battle-tested in the NAM plugin, it was not designed with embedded applications in mind. When we first tried to run it on the Daisy Seed, even with an A1-nano-ReLU model, it would take over 5 seconds of compute time to process 2 seconds of audio... which we should understand would not work for a pedal that is supposed to be doing audio processing in real time.</p>
 <h2 id="optimization-process">Optimization process</h2>
 <p>In order to tackle that issue, we first instrumented the code with profiling to capture how long the code spent on each operation, so we could identify easy targets for optimization. The actual main culprit for the slowdown was <a rel="external" href="https://eigen.tuxfamily.org">Eigen</a>, the library we use for linear algebra, more specifically in how it does matrix multiplications with small matrices and how it allocates temporary memory in embedded devices without an operating system. We added specialized operations for specific sizes of matrices that are used in A1-nano-ReLU, as well as other unrelated optimizations.</p>
-<p>Once we identified all the bottlenecks in the code for the A1-nano-ReLU model, we came up with different optimization tactics. I would love to say that I first implemented microbenchmarks to see which ones really mattered and then I added them to the code, but the real process was actually in reverse: I started by optimizing the actual Core code, then implemented microbenchmarks to better understand what was going on clown-face.</p>
+<p>Once we identified all the bottlenecks in the code for the A1-nano-ReLU model, we came up with different optimization tactics. I would love to say that I first implemented microbenchmarks to see which ones really mattered and then I added them to the code, but the real process was actually in reverse: I started by optimizing the actual Core code, then implemented microbenchmarks to better understand what was going on 🤡.</p>
 <p>The microbenchmarks are all available in <a rel="external" href="https://github.com/tone-3000/nam-inference-benchmarks">this repository</a> for reference. These can be used as a reference for your own hardware, if you are implementing an embedded device that runs NAM.</p>
 <h2 id="results">Results</h2>
 <h3 id="micro-benchmark-results-inline-ops-vs-eigen">Micro-benchmark Results: Inline Ops vs Eigen</h3>
@@ -59,7 +81,7 @@
 <table><thead><tr><th></th><th>Desktop</th><th>Daisy</th></tr></thead><tbody>
 <tr><td><strong>CPU</strong></td><td>Apple Silicon (Macbook Pro M5)</td><td>ARM Cortex-M7 @ 480 MHz, FTZ=1, DN=1</td></tr>
 <tr><td><strong>Compiler flags</strong></td><td><code>-O3 -ffast-math -march=native -DNDEBUG -std=c++17</code></td><td><code>-O2 -ffast-math -funroll-loops -ftree-vectorize -std=gnu++17</code></td></tr>
-<tr><td><strong>Platform</strong></td><td>macOS</td><td>Electrosmith Daisy Seed (STM32H750, 512 KB SRAM, 128 KB DTCM)</td></tr>
+<tr><td><strong>Platform</strong></td><td>macOS</td><td>Electrosmith Daisy Seed (STM32H750, ~1 MB SRAM total: 512 KB AXI SRAM, 128 KB DTCM)</td></tr>
 <tr><td><strong>Eigen parallelization</strong></td><td>Disabled (<code>-DEIGEN_DONT_PARALLELIZE</code>)</td><td>Disabled (<code>-DEIGEN_DONT_PARALLELIZE</code>)</td></tr>
 <tr><td><strong>Timing</strong></td><td><code>std::chrono::high_resolution_clock</code></td><td>DWT CYCCNT (cycle-accurate, zero overhead). 1 cycle = 2.08 ns @ 480 MHz</td></tr>
 <tr><td><strong>Iterations</strong></td><td>5000 (warmup: 100)</td><td>1000 (warmup: 100)</td></tr>
@@ -394,7 +416,7 @@
 <tr><td style="text-align: left">Ring buffer Eigen</td><td style="text-align: center"><strong>1.84--4.25x</strong></td><td style="text-align: center"><strong>9.39--9.86x</strong></td><td style="text-align: left">Eigen's biggest win, even larger on ARM</td></tr>
 </tbody></table>
 <h2 id="json-when-processing-text-becomes-a-problem">JSON - when processing text becomes a problem</h2>
-<p>NeuralAmpModelerCore uses nlohmann::json to parse .nam files, but it requires a lot of memory to parse a model and memory is not exactly something we have plenty of... E.g. an A1 NAM  model stored as a JSON file takes almost 400KB of memory. Remember when we said the Cortex M7 has between 1-2MB of RAM? Yeah, that is going to be a problem.</p>
+<p>NeuralAmpModelerCore uses nlohmann::json to parse .nam files, but it requires a lot of memory to parse a model and memory is not exactly something we have plenty of... E.g. an A1 NAM model stored as a JSON file takes almost 400KB of memory. Remember when we said the Daisy Seed has about 1 MB of RAM? Yeah, that is going to be a problem.</p>
 <p>JSON is cool and very accessible for users, as you can just open it in a text file or parse it without any special dependencies in most programming languages. And parsing JSON is definitely not an issue on desktop (your browser does it thousands of times every day without breaking a sweat)... so we did not want to replace the JSON format.</p>
 <p>Our approach was to refactor the factory methods in NeuralAmpModelerCore so they expect some sort of model configuration object instead of a JSON object, and offload parsing either JSON or another file-based representation of models to a parser. This way, both JSON and other formats can use the same "entry point" to build a model from a file, they would just use different parsers.</p>
 <p>We then came up with the namb format, a compact binary format for models to be used instead of the regular nam format in embedded devices. This format is meant to be used as an exchange format between a controller application (say, an app to load models that runs on your phone) and the embedded device. The app converts the nam format that is retrieved from the T3K website into a compact format that is more suited to your pedal, then transmits it over Bluetooth or an USB cable. There is no model conversion here: think of namb just as a more "compressed" format. Learn more at <a rel="external" href="https://github.com/tone-3000/nam-binary-loader">this repo</a>.</p>

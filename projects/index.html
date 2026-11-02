@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Selected work: Neural Amp Modeler on embedded hardware, speech and audio AI research, and side projects.">
+    <title>João Felipe Santos | Projects</title>
+    
+
+    <link rel="stylesheet" href="https://jfsantos.dev/style.css?h=72bd07992bac562ea3f6">
+    
+
+    
+    
+    
+    
+
+    <meta property="og:site_name" content="João Felipe Santos">
+    <meta property="og:title" content="Projects">
+    <meta property="og:description" content="Selected work: Neural Amp Modeler on embedded hardware, speech and audio AI research, and side projects.">
+    <meta property="og:url" content="https://jfsantos.dev/projects/">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="https://jfsantos.dev/about/joao.png">
+    <meta name="twitter:card" content="summary">
+    <link rel="canonical" href="https://jfsantos.dev/projects/">
+
+    
+        
+            
+                
+                    
+                        <link rel="alternate" type="application/atom+xml" title="João Felipe Santos - Atom Feed" href="https://jfsantos.dev/atom.xml">
+                    
+                
+            
+        
+    
+</head>
+<body>
+    
+<header class="space">
+    <a href="https://jfsantos.dev">&LeftArrow; Home</a>
+</header>
+
+    
+<main>
+    <h1>Projects</h1>
+    
+    <div class="space"></div>
+    <h2 id="neural-amp-modeler-tone3000">Neural Amp Modeler @ Tone3000</h2>
+<ul>
+<li><a rel="external" href="https://github.com/tone-3000/nam-pedal">nam-pedal</a>: example firmware running NAM in real time on the Electrosmith Daisy Seed (ARM Cortex-M7), meant as a blueprint for porting NAM to embedded targets.</li>
+<li><a rel="external" href="https://github.com/tone-3000/nam-binary-loader">nam-binary-loader</a>: <code>.namb</code>, a compact binary model format and loader for memory-constrained devices.</li>
+<li><a rel="external" href="https://github.com/tone-3000/nam-inference-benchmarks">nam-inference-benchmarks</a>: micro-benchmarks for NAM inference operations on desktop and Cortex-M7.</li>
+<li>NeuralAmpModelerCore contributions: <a rel="external" href="https://github.com/sdatkinson/NeuralAmpModelerCore/commit/a0c93c0c3934abec0bca80d2e9e592ac86217db4">inline GEMM and embedded optimizations</a> and <a rel="external" href="https://github.com/sdatkinson/NeuralAmpModelerCore/commit/20a04fcf466dc4233730412b120e5bbad72402c3">decoupling model construction from JSON parsing</a>.</li>
+<li>Write-up: <a href="https://jfsantos.dev/blog/nam-a2-embedded/">Bringing NAM A2 to Embedded Hardware</a>.</li>
+</ul>
+<h2 id="speech-and-audio-ai-research">Speech and audio AI research</h2>
+<ul>
+<li><a rel="external" href="https://fugatto.github.io/">Fugatto</a> and <a rel="external" href="https://musicflamingo.github.io/">Music Flamingo</a> (NVIDIA): generative audio and music understanding models.</li>
+<li><a rel="external" href="https://www.nvidia.com/en-us/ai-data-science/products/riva/">Riva</a> (NVIDIA): speech AI SDK.</li>
+<li><a rel="external" href="https://openreview.net/pdf?id=B1VWyySKx">Char2Wav</a> (MILA): one of the first end-to-end neural speech synthesis models.</li>
+<li><a rel="external" href="https://github.com/jfsantos/SRMRpy">SRMRpy</a>: Python implementation of the SRMR speech quality and intelligibility metric, from my master's work on auditory modeling.</li>
+</ul>
+<h2 id="side-projects">Side projects</h2>
+<ul>
+<li><a href="/tracker/">Bebhionn</a>: a vertical tracker for the Sega Saturn's YMF292 sound chip, running MAME's SCSP emulation in the browser via WebAssembly. Write-up coming soon.</li>
+</ul>
+
+</main>
+
+    <div class="dark-mode-buttons">
+        <button class="dark-mode-button" id="dark-mode-on"><img src="https://jfsantos.dev/dark_mode.svg" width="24" height="24" alt="Dark mode" aria-label="dark mode toggle" title="Dark mode"></button>
+        <button class="dark-mode-button" id="dark-mode-off"><img src="https://jfsantos.dev/light_mode.svg" width="24" height="24" alt="Light mode" aria-label="light mode toggle" title="Light mode"></button>
+    </div>
+    <script>
+        const cls = document.querySelector("html").classList;
+        const sessionTheme = sessionStorage.getItem("theme");
+
+        function setDark() {
+            cls.add("dark-mode");
+            cls.remove("light-mode");
+            sessionStorage.setItem("theme", "dark");
+        }
+        function setLight() {
+            cls.add("light-mode");
+            cls.remove("dark-mode");
+            sessionStorage.setItem("theme", "light");
+        }
+
+        if (sessionTheme === "dark") {
+            setDark();
+        } else if (sessionTheme === "light") {
+            setLight();
+        } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            setDark();
+        }
+
+        document.getElementById("dark-mode-on").addEventListener("click", function(e) {
+            setDark();
+        });
+        document.getElementById("dark-mode-off").addEventListener("click", function(e) {
+            setLight();
+        });
+    </script>
+    <noscript>
+        <style>
+            .dark-mode-buttons {
+                display: none;
+            }
+        </style>
+    </noscript>
+</body>
+</html>
