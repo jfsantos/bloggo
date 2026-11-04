@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Audio ML on Bare Metal: GEMM, Memory Layout, and Real-Time Dataflow on Embedded ARM. ADC 2026 talk by Andrea Martelloni and João Felipe Santos.">
+    <title>João Felipe Santos | ADC 2026</title>
+    
+
+    <link rel="stylesheet" href="https://jfsantos.dev/style.css?h=72bd07992bac562ea3f6">
+    
+
+    
+    
+    
+    
+
+    <meta property="og:site_name" content="João Felipe Santos">
+    <meta property="og:title" content="ADC 2026">
+    <meta property="og:description" content="Audio ML on Bare Metal: GEMM, Memory Layout, and Real-Time Dataflow on Embedded ARM. ADC 2026 talk by Andrea Martelloni and João Felipe Santos.">
+    <meta property="og:url" content="https://jfsantos.dev/adc/">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="https://jfsantos.dev/about/joao.png">
+    <meta name="twitter:card" content="summary">
+    <link rel="canonical" href="https://jfsantos.dev/adc/">
+
+    <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "50c1dd7615b4464698a5c165879ba8f3"}'></script>
+
+
+    
+        
+            
+                
+                    
+                        <link rel="alternate" type="application/atom+xml" title="João Felipe Santos - Atom Feed" href="https://jfsantos.dev/atom.xml">
+                    
+                
+            
+        
+    
+</head>
+<body>
+    
+<header class="space">
+    <a href="https://jfsantos.dev">&LeftArrow; Home</a>
+</header>
+
+    
+<main>
+    <h1>ADC 2026</h1>
+    
+    <div class="space"></div>
+    <h2 id="talk">Talk</h2>
+<p><strong><a rel="external" href="https://conference.audio.dev/session/2026/audio-ml-on-bare-metal/">Audio ML on Bare Metal: GEMM, Memory Layout, and Real-Time Dataflow on Embedded ARM</a></strong><br />
+with Andrea Martelloni (Blackstar Amplification)<br />
+Wednesday, 11 November 2026 · 10:00–10:50 · Bristol 2</p>
+<ul>
+<li><a rel="external" href="https://conference.audio.dev/session/2026/audio-ml-on-bare-metal/">Session page and abstract</a></li>
+<li><a rel="external" href="https://github.com/jfsantos/nam-m7-experiments">Code: jfsantos/nam-m7-experiments</a></li>
+</ul>
+<h2 id="related">Related</h2>
+<ul>
+<li><a href="https://jfsantos.dev/blog/nam-a2-embedded/">Bringing NAM A2 to Embedded Hardware</a></li>
+<li><a href="https://jfsantos.dev/projects/">Projects</a></li>
+</ul>
+<h2 id="contact">Contact</h2>
+<ul>
+<li><a href="mailto:hello@jfsantos.dev">hello@jfsantos.dev</a></li>
+<li><a rel="external" href="https://github.com/jfsantos">GitHub</a></li>
+</ul>
+
+</main>
+
+    <div class="dark-mode-buttons">
+        <button class="dark-mode-button" id="dark-mode-on"><img src="https://jfsantos.dev/dark_mode.svg" width="24" height="24" alt="Dark mode" aria-label="dark mode toggle" title="Dark mode"></button>
+        <button class="dark-mode-button" id="dark-mode-off"><img src="https://jfsantos.dev/light_mode.svg" width="24" height="24" alt="Light mode" aria-label="light mode toggle" title="Light mode"></button>
+    </div>
+    <script>
+        const cls = document.querySelector("html").classList;
+        const sessionTheme = sessionStorage.getItem("theme");
+
+        function setDark() {
+            cls.add("dark-mode");
+            cls.remove("light-mode");
+            sessionStorage.setItem("theme", "dark");
+        }
+        function setLight() {
+            cls.add("light-mode");
+            cls.remove("dark-mode");
+            sessionStorage.setItem("theme", "light");
+        }
+
+        if (sessionTheme === "dark") {
+            setDark();
+        } else if (sessionTheme === "light") {
+            setLight();
+        } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            setDark();
+        }
+
+        document.getElementById("dark-mode-on").addEventListener("click", function(e) {
+            setDark();
+        });
+        document.getElementById("dark-mode-off").addEventListener("click", function(e) {
+            setLight();
+        });
+    </script>
+    <noscript>
+        <style>
+            .dark-mode-buttons {
+                display: none;
+            }
+        </style>
+    </noscript>
+</body>
+</html>
